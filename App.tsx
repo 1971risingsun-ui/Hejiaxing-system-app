@@ -27,10 +27,11 @@ export const generateId = () => {
 
 /**
  * 輔助函式：將 Buffer 轉換為 Base64 (解決大型陣列造成手機 call stack 溢位問題)
+ * 修正：使用 any 斷言解決 TypeScript 在特定環境下不允許 Uint8Array 轉 BlobPart 的錯誤
  */
 const bufferToBase64 = (buffer: Uint8Array, mimeType: string): Promise<string> => {
   return new Promise((resolve) => {
-    const blob = new Blob([buffer], { type: mimeType });
+    const blob = new Blob([buffer as any], { type: mimeType });
     const reader = new FileReader();
     reader.onloadend = () => resolve(reader.result as string);
     reader.readAsDataURL(blob);
@@ -118,7 +119,7 @@ const App: React.FC = () => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    setIsWorkspaceLoading(true); // 借用 loading 狀態
+    setIsWorkspaceLoading(true); 
     try {
       const workbook = new ExcelJS.Workbook();
       const arrayBuffer = await file.arrayBuffer();
@@ -150,7 +151,6 @@ const App: React.FC = () => {
       let addedCount = 0;
       let updatedCount = 0;
 
-      // 使用迴圈解析，避免一次性處理大量非同步造成手機崩潰
       for (let i = 2; i <= worksheet.rowCount; i++) {
         const row = worksheet.getRow(i);
         const getVal = (key: string) => {
@@ -173,7 +173,6 @@ const App: React.FC = () => {
         const appointmentDate = parseExcelDate(getVal('預約日期'));
         const reportDate = parseExcelDate(getVal('報修日期'));
 
-        // 轉換同行圖片
         const rowImages = imagesByRow[i] || [];
         const imageAttachments: Attachment[] = [];
         for (const img of rowImages) {
@@ -244,7 +243,6 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    // 儲存快取增加防護，防止 LocalStorage 滿了導致白屏
     const saveCache = () => {
         try {
             localStorage.setItem('hjx_cache_projects', JSON.stringify(projects));
