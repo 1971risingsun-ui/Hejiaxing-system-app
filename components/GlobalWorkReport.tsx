@@ -1,3 +1,4 @@
+
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { Project, User, ProjectType, DailyReport, SitePhoto } from '../types';
 import { ClipboardListIcon, BoxIcon, CalendarIcon, XIcon, ChevronRightIcon, PlusIcon, TrashIcon, CheckCircleIcon, SunIcon, CloudIcon, RainIcon, CameraIcon, LoaderIcon, XCircleIcon } from './Icons';
@@ -14,10 +15,8 @@ const GlobalWorkReport: React.FC<GlobalWorkReportProps> = ({ projects, currentUs
   const [currentViewMonth, setCurrentViewMonth] = useState(new Date()); 
   const [selectedDate, setSelectedDate] = useState(new Date().toLocaleDateString('sv-SE'));
 
-  // 用於追蹤當天手動追加的專案 ID
   const [manuallyAddedIds, setManuallyAddedIds] = useState<Record<string, string[]>>({});
   
-  // 常駐詳情表單的本地 Buffer (用於處理「先填寫、後掛載專案」的情況)
   const [formBuffer, setFormBuffer] = useState<{
     worker: string;
     assistant: string;
@@ -37,7 +36,6 @@ const GlobalWorkReport: React.FC<GlobalWorkReportProps> = ({ projects, currentUs
   const [isProcessingPhotos, setIsProcessingPhotos] = useState(false);
   const photoInputRef = useRef<HTMLInputElement | null>(null);
 
-  // 當前日期 active 的專案
   const activeProjects = useMemo(() => {
     const todayAdded = manuallyAddedIds[selectedDate] || [];
     return projects.filter(p => {
@@ -51,14 +49,12 @@ const GlobalWorkReport: React.FC<GlobalWorkReportProps> = ({ projects, currentUs
   }, [projects, selectedDate, manuallyAddedIds]);
 
   const mainActiveProject = useMemo(() => {
-      // 優先序：圍籬 > 組合屋
       const constProjects = activeProjects.filter(p => p.type === ProjectType.CONSTRUCTION);
       if (constProjects.length > 0) return constProjects[0];
       const modularProjects = activeProjects.filter(p => p.type === ProjectType.MODULAR_HOUSE);
       return modularProjects.length > 0 ? modularProjects[0] : null;
   }, [activeProjects]);
 
-  // 同步邏輯：當 mainActiveProject 改變或日期改變時，更新 formBuffer
   useEffect(() => {
     if (mainActiveProject) {
         const report = (mainActiveProject.reports || []).find(r => r.date === selectedDate);
@@ -72,12 +68,10 @@ const GlobalWorkReport: React.FC<GlobalWorkReportProps> = ({ projects, currentUs
             photos: (report?.photos || []).map(id => mainActiveProject.photos.find(p => p.id === id)).filter((p): p is SitePhoto => !!p)
         });
     } else {
-        // 如果當天沒專案，清空 Buffer 以供填寫
         setFormBuffer({ worker: '', assistant: '', weather: 'sunny', content: '', photos: [] });
     }
   }, [selectedDate, mainActiveProject?.id]);
 
-  // 月曆標記：僅圍籬與組合屋案件
   const recordedDates = useMemo(() => {
     const dates = new Set<string>();
     projects.filter(p => p.type === ProjectType.CONSTRUCTION || p.type === ProjectType.MODULAR_HOUSE).forEach(p => {
@@ -87,12 +81,10 @@ const GlobalWorkReport: React.FC<GlobalWorkReportProps> = ({ projects, currentUs
     return dates;
   }, [projects]);
 
-  // 單向更新方法：僅更新 DailyReport 欄位
   const saveToProject = (project: Project, updates: Partial<typeof formBuffer>) => {
     const newData = { ...formBuffer, ...updates };
     const existingReport = (project.reports || []).find(r => r.date === selectedDate);
     
-    // 保持已完成/未完成的前綴
     const report = (project.reports || []).find(r => r.date === selectedDate);
     const prefix = report?.content?.startsWith('[已完成]') ? '[已完成] ' : '[未完成] ';
 
@@ -218,7 +210,6 @@ const GlobalWorkReport: React.FC<GlobalWorkReportProps> = ({ projects, currentUs
                           </div>
                       );
                   })}
-                  {items.length === 0 && <div className="text-center py-4 bg-slate-50 border border-dashed border-slate-200 rounded-xl text-[11px] text-slate-400 italic">尚未追加案件</div>}
               </div>
               <div className="mt-4">
                   <select 
@@ -231,7 +222,6 @@ const GlobalWorkReport: React.FC<GlobalWorkReportProps> = ({ projects, currentUs
                     className={`w-full text-xs font-bold py-2.5 px-4 bg-white border border-dashed rounded-xl shadow-sm cursor-pointer outline-none transition-all ${type === ProjectType.CONSTRUCTION ? 'border-blue-200 text-blue-600' : type === ProjectType.MODULAR_HOUSE ? 'border-emerald-200 text-emerald-600' : 'border-orange-200 text-orange-600'}`}
                   >
                       <option value="">+ 追加{label.split(' ')[0]}案件 (不限狀態)</option>
-                      {/* 下拉選單涵蓋所有案件 (不限進行中) */}
                       {projects.filter(p => p.type === type && !activeProjects.some(ap => ap.id === p.id)).map(p => (
                           <option key={p.id} value={p.id}>{p.name} ({p.status})</option>
                       ))}
@@ -243,7 +233,6 @@ const GlobalWorkReport: React.FC<GlobalWorkReportProps> = ({ projects, currentUs
 
   return (
     <div className="p-4 md:p-6 max-w-7xl mx-auto flex flex-col gap-4 pb-24 animate-fade-in">
-      {/* 控制表頭 */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-4 rounded-2xl border border-slate-200 shadow-sm sticky top-0 z-30">
         <div className="flex items-center gap-3">
             <div className="bg-blue-100 p-2.5 rounded-xl"><ClipboardListIcon className="w-6 h-6 text-blue-600" /></div>
@@ -267,30 +256,20 @@ const GlobalWorkReport: React.FC<GlobalWorkReportProps> = ({ projects, currentUs
           {renderActiveList(ProjectType.MAINTENANCE)}
       </div>
 
-      {/* 常駐施作詳情表單 */}
       <div className="bg-white border border-blue-200 rounded-2xl shadow-lg overflow-hidden mt-10">
           <div className={`px-6 py-4 flex items-center justify-between ${mainActiveProject ? 'bg-blue-600' : 'bg-slate-700'}`}>
               <h3 className="text-white font-bold text-lg flex items-center gap-2">今日施作詳情 (常駐顯示)</h3>
-              {mainActiveProject ? (
+              {mainActiveProject && (
                   <div className="text-right">
                     <span className="text-[10px] text-blue-100 font-bold uppercase block">
                         {mainActiveProject.type === ProjectType.MODULAR_HOUSE ? '連動組合屋' : '連動圍籬'}
                     </span>
                     <span className="text-white font-bold text-sm truncate max-w-[150px]">{mainActiveProject.name}</span>
                   </div>
-              ) : (
-                  <span className="text-[10px] text-slate-300 font-bold uppercase">尚未掛載案件 - 僅限預覽填寫</span>
               )}
           </div>
 
           <div className="p-6 space-y-8">
-            {!mainActiveProject && (
-                <div className="bg-amber-50 border border-amber-200 p-3 rounded-xl flex items-start gap-3 mb-2 animate-pulse">
-                    <BoxIcon className="w-5 h-5 text-amber-500 mt-0.5" />
-                    <p className="text-xs text-amber-700 font-medium leading-relaxed">提示：目前尚未追加案件，您可以先填寫，稍後追加案件時內容將自動帶入並存檔。</p>
-                </div>
-            )}
-
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
                     <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">師傅 (Thợ chính)</label>
@@ -322,7 +301,7 @@ const GlobalWorkReport: React.FC<GlobalWorkReportProps> = ({ projects, currentUs
                         <label className="block text-[10px] font-bold text-slate-400 uppercase mb-2">當日天氣</label>
                         <div className="flex gap-2">
                             {['sunny', 'cloudy', 'rainy'].map((w) => (
-                                <button key={w} onClick={() => handleFieldChange('weather', w)} className={`flex-1 py-3 rounded-xl border flex justify-center transition-all ${formBuffer.weather === w ? 'bg-blue-50 border-blue-500 text-blue-600 ring-2 ring-blue-500/10' : 'bg-white border-slate-200 text-slate-400'}`}>
+                                <button key={w} onClick={() => handleFieldChange('weather', w)} className={`flex-1 py-3 rounded-xl border flex justify-center transition-all ${formBuffer.weather === w ? 'bg-blue-50 border-blue-500 text-blue-600' : 'bg-white border-slate-200 text-slate-400'}`}>
                                     {w === 'sunny' && <SunIcon className="w-6 h-6" />}{w === 'cloudy' && <CloudIcon className="w-6 h-6" />}{w === 'rainy' && <RainIcon className="w-6 h-6" />}
                                 </button>
                             ))}
@@ -336,15 +315,15 @@ const GlobalWorkReport: React.FC<GlobalWorkReportProps> = ({ projects, currentUs
             </div>
 
             <div className="pt-6 border-t border-slate-100">
-                <label className="block text-[10px] font-bold text-slate-400 uppercase mb-2">現場照片 (Ảnh hiện trường)</label>
+                <label className="block text-[10px] font-bold text-slate-400 uppercase mb-2">現場照片 (不裁切顯示)</label>
                 <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-8 gap-3">
                     <button onClick={() => photoInputRef.current?.click()} disabled={isProcessingPhotos} className="aspect-square border-2 border-dashed border-slate-200 bg-slate-50 text-slate-400 rounded-2xl flex items-center justify-center transition-all group hover:bg-blue-50">
                         {isProcessingPhotos ? <LoaderIcon className="w-6 h-6 animate-spin" /> : <CameraIcon className="w-8 h-8 group-active:scale-90" />}
                     </button>
                     <input type="file" multiple accept="image/*" ref={photoInputRef} className="hidden" onChange={handlePhotoUpload} />
                     {formBuffer.photos.map(ph => (
-                        <div key={ph.id} className="relative aspect-square rounded-2xl overflow-hidden border border-slate-100 group shadow-sm">
-                            <img src={ph.url} className="w-full h-full object-cover" alt="site" />
+                        <div key={ph.id} className="relative aspect-square rounded-2xl overflow-hidden border border-slate-100 group shadow-sm bg-slate-50 flex items-center justify-center">
+                            <img src={ph.url} className="max-w-full max-h-full object-contain" alt="site" />
                             <button onClick={() => handleFieldChange('photos', formBuffer.photos.filter(p => p.id !== ph.id))} className="absolute top-1.5 right-1.5 bg-black/50 text-white rounded-full p-1.5 opacity-0 group-hover:opacity-100 transition-opacity"><XIcon className="w-3.5 h-3.5" /></button>
                         </div>
                     ))}

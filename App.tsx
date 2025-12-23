@@ -10,7 +10,7 @@ import EditProjectModal from './components/EditProjectModal';
 import LoginScreen from './components/LoginScreen';
 import GlobalWorkReport from './components/GlobalWorkReport';
 import GlobalMaterials from './components/GlobalMaterials';
-import { HomeIcon, UserIcon, LogOutIcon, ShieldIcon, MenuIcon, XIcon, ChevronRightIcon, WrenchIcon, UploadIcon, LoaderIcon, ClipboardListIcon, LayoutGridIcon, BoxIcon, DownloadIcon } from './components/Icons';
+import { HomeIcon, UserIcon, LogOutIcon, ShieldIcon, MenuIcon, XIcon, ChevronRightIcon, WrenchIcon, UploadIcon, LoaderIcon, ClipboardListIcon, LayoutGridIcon, BoxIcon, DownloadIcon, FileTextIcon } from './components/Icons';
 import { getDirectoryHandle, saveDbToLocal, loadDbFromLocal } from './utils/fileSystem';
 import { downloadBlob } from './utils/fileHelpers';
 
@@ -25,7 +25,39 @@ export const generateId = () => {
   return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
 };
 
-// 嘗試從 LocalStorage 恢復資料作為墊底方案
+/**
+ * 解析 mm/dd/yy、日期物件或 Excel 序號日期
+ */
+const parseExcelDate = (val: any): string => {
+  if (val === null || val === undefined || val === '') return '';
+  
+  // 如果已經是 Date 物件 (ExcelJS 常用)
+  if (val instanceof Date) {
+    if (isNaN(val.getTime())) return '';
+    return val.toISOString().split('T')[0];
+  }
+  
+  const str = String(val).trim();
+  if (!str) return '';
+
+  // 處理 mm/dd/yy 格式 (例如 12/25/24)
+  const dateMatch = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (dateMatch) {
+    let [_, m, d, y] = dateMatch;
+    // 如果年份為兩位數，假設為 20xx
+    if (y.length === 2) y = '20' + y;
+    return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+  }
+
+  // 處理 Excel 序號日期
+  if (!isNaN(Number(str)) && Number(str) > 30000) {
+    const date = new Date(Math.round((Number(str) - 25569) * 86400 * 1000));
+    return date.toISOString().split('T')[0];
+  }
+  
+  return str;
+};
+
 const getInitialData = (key: string, defaultValue: any) => {
   const saved = localStorage.getItem(`hjx_cache_${key}`);
   return saved ? JSON.parse(saved) : defaultValue;
@@ -38,18 +70,17 @@ const App: React.FC = () => {
     { id: 'u-1', name: 'Admin User', email: 'admin@hejiaxing.ai', role: UserRole.ADMIN, avatar: '' },
   ]));
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() => getInitialData('auditLogs', []));
-  
+  const [importUrl, setImportUrl] = useState(() => localStorage.getItem('hjx_import_url') || '\\\\HJXSERVER\\App test\\上傳排程表.xlsx');
   const [dirHandle, setDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [isWorkspaceLoading, setIsWorkspaceLoading] = useState(false);
   const isIframe = window.self !== window.top;
+  const excelInputRef = useRef<HTMLInputElement>(null);
 
-  // 連結本機資料夾
   const connectWorkspace = async () => {
     setIsWorkspaceLoading(true);
     try {
       const handle = await getDirectoryHandle();
       setDirHandle(handle);
-      
       const savedData = await loadDbFromLocal(handle);
       if (savedData) {
         if (savedData.projects) setProjects(savedData.projects);
@@ -65,26 +96,179 @@ const App: React.FC = () => {
     }
   };
 
-  // 手動下載 db.json 作為備份 (iframe 環境的替代方案)
-  const manualDownloadDb = () => {
-    const data = { projects, users: allUsers, auditLogs, exportDate: new Date().toISOString() };
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    downloadBlob(blob, `hjx_db_backup.json`);
+  /**
+   * 排序邏輯：依預約日期由近至遠，沒有預約則用報修日期
+   */
+  const sortProjects = (list: Project[]) => {
+    return [...list].sort((a, b) => {
+      const dateA = a.appointmentDate || a.reportDate || '9999-12-31';
+      const dateB = b.appointmentDate || b.reportDate || '9999-12-31';
+      return dateA.localeCompare(dateB);
+    });
   };
 
-  // 自動儲存至本機資料夾 (若有連結) 並同時備份至 LocalStorage
+  /**
+   * Excel 匯入 (依「類別」自動分類並更新預約/報修日期)
+   */
+  const handleImportExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const workbook = new ExcelJS.Workbook();
+      const arrayBuffer = await file.arrayBuffer();
+      await workbook.xlsx.load(arrayBuffer);
+      const worksheet = workbook.worksheets[0];
+
+      // 提取所有圖片
+      const imagesByRow: Record<number, { name: string, buffer: Uint8Array, extension: string }[]> = {};
+      worksheet.getImages().forEach((image: any) => {
+        const imgData = workbook.model.media.find((m: any) => m.index === image.imageId);
+        const rowNum = Math.floor(image.range.tl.row) + 1;
+        if (imgData) {
+          if (!imagesByRow[rowNum]) imagesByRow[rowNum] = [];
+          imagesByRow[rowNum].push({
+            name: `excel_row${rowNum}_img${image.imageId}.${imgData.extension}`,
+            buffer: imgData.buffer,
+            extension: imgData.extension
+          });
+        }
+      });
+
+      let headers: Record<string, number> = {};
+      const headerRow = worksheet.getRow(1);
+      headerRow.eachCell((cell: any, colNumber: number) => {
+        const val = String(cell.value || '').trim();
+        headers[val] = colNumber;
+      });
+
+      const existingProjects = [...projects];
+      let addedCount = 0;
+      let updatedCount = 0;
+
+      worksheet.eachRow((row: any, rowNumber: number) => {
+        if (rowNumber === 1) return;
+
+        const getVal = (key: string) => {
+          const colIdx = headers[key];
+          if (!colIdx) return '';
+          const cell = row.getCell(colIdx);
+          const val = cell.value;
+          
+          if (val instanceof Date) return val;
+          if (val && typeof val === 'object') {
+            return (val as any).text || (val as any).result || '';
+          }
+          return val === null || val === undefined ? '' : val;
+        };
+
+        const projectName = String(getVal('客戶') || '').trim();
+        if (!projectName) return;
+
+        let clientName = projectName;
+        if (projectName.includes('-')) {
+          clientName = projectName.split('-')[0].trim();
+        }
+
+        // 依據「類別」欄位分類
+        const category = String(getVal('類別') || '').trim();
+        let projectType = ProjectType.CONSTRUCTION; // 預設圍籬
+        if (category.includes('維修')) {
+          projectType = ProjectType.MAINTENANCE;
+        } else if (category.includes('組合屋')) {
+          projectType = ProjectType.MODULAR_HOUSE;
+        }
+
+        // 預約與報修日期解析
+        const appointmentDate = parseExcelDate(getVal('預約日期'));
+        const reportDate = parseExcelDate(getVal('報修日期'));
+
+        const rowImages = imagesByRow[rowNumber] || [];
+        const imageAttachments: Attachment[] = rowImages.map(img => {
+          const binary = Array.from(img.buffer).map(b => String.fromCharCode(b)).join('');
+          const base64 = btoa(binary);
+          const mimeType = img.extension === 'png' ? 'image/png' : 'image/jpeg';
+          return {
+            id: generateId(),
+            name: img.name,
+            size: img.buffer.length,
+            type: mimeType,
+            url: `data:${mimeType};base64,${base64}`
+          };
+        });
+
+        const existingIdx = existingProjects.findIndex(p => p.name === projectName);
+        const projectData: Partial<Project> = {
+          clientName,
+          type: projectType,
+          address: String(getVal('地址') || '').trim(),
+          description: String(getVal('工程') || '').trim(),
+          clientContact: String(getVal('聯絡人') || '').trim(),
+          clientPhone: String(getVal('電話') || '').trim(),
+          remarks: String(getVal('備註') || '').trim(),
+          appointmentDate,
+          reportDate
+        };
+
+        if (existingIdx > -1) {
+          const existing = existingProjects[existingIdx];
+          const newAtts = imageAttachments.filter(na => !(existing.attachments || []).some(ea => ea.name === na.name));
+          
+          existingProjects[existingIdx] = { 
+            ...existing, 
+            ...projectData,
+            attachments: [...(existing.attachments || []), ...newAtts]
+          };
+          updatedCount++;
+        } else {
+          const newProj: Project = {
+            id: generateId(),
+            name: projectName,
+            type: projectType,
+            status: ProjectStatus.PLANNING,
+            progress: 0,
+            milestones: [],
+            photos: [],
+            materials: [],
+            reports: [],
+            constructionItems: [],
+            constructionSignatures: [],
+            completionReports: [],
+            attachments: imageAttachments,
+            ...projectData
+          } as Project;
+          existingProjects.push(newProj);
+          addedCount++;
+        }
+      });
+
+      const sortedResult = sortProjects(existingProjects);
+      setProjects(sortedResult);
+      alert(`匯入完成！\n新增: ${addedCount} 筆\n更新: ${updatedCount} 筆\n已根據「類別」欄位進行分類並排序。`);
+
+      setAuditLogs(prev => [{
+        id: generateId(),
+        userId: currentUser?.id || 'system',
+        userName: currentUser?.name || '系統',
+        action: 'IMPORT_EXCEL',
+        details: `Excel 匯入：${addedCount} 新增, ${updatedCount} 更新 (含類別分類)`,
+        timestamp: Date.now()
+      }, ...prev]);
+
+    } catch (err) {
+      console.error('Excel 匯入失敗:', err);
+      alert('解析 Excel 失敗，請確認欄位名稱 (客戶、類別、預約日期、報修日期) 是否正確。');
+    }
+
+    if (excelInputRef.current) excelInputRef.current.value = '';
+  };
+
   useEffect(() => {
     const dataToSave = { projects, users: allUsers, auditLogs, lastSaved: new Date().toISOString() };
-    
-    // 1. 同步至瀏覽器暫存 (避免 iframe 重新整理資料遺失)
     localStorage.setItem('hjx_cache_projects', JSON.stringify(projects));
     localStorage.setItem('hjx_cache_users', JSON.stringify(allUsers));
     localStorage.setItem('hjx_cache_auditLogs', JSON.stringify(auditLogs));
-
-    // 2. 若有連結資料夾，同步至本機檔案
-    if (dirHandle) {
-      saveDbToLocal(dirHandle, dataToSave);
-    }
+    if (dirHandle) saveDbToLocal(dirHandle, dataToSave);
   }, [projects, allUsers, auditLogs, dirHandle]);
 
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
@@ -96,19 +280,27 @@ const App: React.FC = () => {
   const handleLogin = (user: User) => { setCurrentUser(user); setView('construction'); };
   const handleLogout = () => { setCurrentUser(null); setIsSidebarOpen(false); };
 
-  const handleAddProject = (newProject: Project) => { setProjects([newProject, ...projects]); setIsAddModalOpen(false); };
+  const handleAddProject = (newProject: Project) => { 
+    const updated = sortProjects([newProject, ...projects]);
+    setProjects(updated); 
+    setIsAddModalOpen(false); 
+  };
+
   const handleUpdateProject = (updatedProject: Project) => {
-    setProjects(prev => prev.map(p => p.id === updatedProject.id ? updatedProject : p));
+    setProjects(prev => {
+        const newList = prev.map(p => p.id === updatedProject.id ? updatedProject : p);
+        return sortProjects(newList);
+    });
     if (selectedProject?.id === updatedProject.id) setSelectedProject(updatedProject);
   };
 
   if (!currentUser) return <LoginScreen onLogin={handleLogin} />;
 
   const currentViewProjects = projects.filter(p => {
-      if (view === 'construction') return p.type === ProjectType.CONSTRUCTION;
-      if (view === 'modular_house') return p.type === ProjectType.MODULAR_HOUSE;
-      if (view === 'maintenance') return p.type === ProjectType.MAINTENANCE;
-      return false;
+    if (view === 'construction') return p.type === ProjectType.CONSTRUCTION;
+    if (view === 'modular_house') return p.type === ProjectType.MODULAR_HOUSE;
+    if (view === 'maintenance') return p.type === ProjectType.MAINTENANCE;
+    return false;
   });
 
   const renderSidebarContent = () => (
@@ -119,37 +311,41 @@ const App: React.FC = () => {
          </h1>
       </div>
       <nav className="flex-1 px-4 space-y-2 overflow-y-auto no-scrollbar">
-        {/* 本機連線按鈕區塊 */}
-        <div className="space-y-1">
+        <div className="space-y-3 mb-6">
           <button 
             onClick={connectWorkspace}
             className={`flex items-center gap-3 px-4 py-3 rounded-xl w-full transition-all border ${
               dirHandle 
                 ? 'bg-green-600/10 border-green-500 text-green-400' 
-                : isIframe
-                  ? 'bg-slate-800 border-slate-700 text-slate-400 opacity-80 cursor-default'
-                  : 'bg-red-600/10 border-red-500 text-red-400 font-bold animate-pulse hover:bg-red-600/20'
+                : 'bg-red-600/10 border-red-500 text-red-400 font-bold animate-pulse hover:bg-red-600/20'
             }`}
           >
             {isWorkspaceLoading ? <LoaderIcon className="w-5 h-5 animate-spin" /> : <LayoutGridIcon className="w-5 h-5" />}
-            <div className="flex flex-col items-start">
-              <span className="text-sm font-bold">{dirHandle ? '已連結本機資料夾' : '連結本機資料夾'}</span>
-              {!dirHandle && <span className="text-[10px] opacity-70 truncate max-w-[150px]">{isIframe ? '安全性限制：請在新分頁開啟' : '儲存至 C:\\app test\\v1\\'}</span>}
+            <div className="flex flex-col items-start text-left">
+              <span className="text-sm font-bold">{dirHandle ? '已連結 v1 資料夾' : '連結本機資料夾'}</span>
+              {!dirHandle && <span className="text-[10px] opacity-70">儲存至 C:\\app test\\v1\\</span>}
             </div>
           </button>
 
-          {/* 如果是 iframe 且未連結，提供手動備份按鈕 */}
-          {!dirHandle && (
+          <div className="px-1">
+            <input 
+              type="file" 
+              accept=".xlsx, .xls" 
+              ref={excelInputRef} 
+              className="hidden" 
+              onChange={handleImportExcel} 
+            />
             <button 
-              onClick={manualDownloadDb}
-              className="flex items-center justify-center gap-2 w-full py-1.5 text-[10px] text-slate-500 hover:text-white transition-colors border border-transparent hover:border-slate-700 rounded-lg"
+              onClick={() => excelInputRef.current?.click()}
+              className="flex items-center gap-3 px-4 py-3 rounded-xl w-full transition-all bg-indigo-600/10 border border-indigo-500/30 text-indigo-400 hover:bg-indigo-600 hover:text-white group"
             >
-              <DownloadIcon className="w-3 h-3" /> 手動下載備份 (db.json)
+              <FileTextIcon className="w-5 h-5 group-hover:scale-110 transition-transform" />
+              <div className="flex flex-col items-start text-left">
+                <span className="text-sm font-bold">匯入排程表</span>
+              </div>
             </button>
-          )}
+          </div>
         </div>
-
-        <div className="h-4"></div>
 
         <button onClick={() => { setSelectedProject(null); setView('construction'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'construction' && !selectedProject ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
           <HomeIcon className="w-5 h-5 flex-shrink-0" /> <span className="font-medium">圍籬總覽</span>
@@ -184,11 +380,8 @@ const App: React.FC = () => {
 
   return (
     <div className="flex h-screen bg-[#f8fafc] overflow-hidden">
-      {/* 行動版側邊欄抽屜 */}
       <div className={`fixed inset-0 z-[100] md:hidden transition-opacity duration-300 ${isSidebarOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'}`}>
-        {/* 遮罩層 */}
         <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={() => setIsSidebarOpen(false)} />
-        {/* 側邊欄本體 */}
         <aside className={`absolute left-0 top-0 bottom-0 w-64 bg-slate-900 text-white shadow-2xl transition-transform duration-300 transform ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} flex flex-col`}>
           <div className="flex justify-end p-4">
             <button onClick={() => setIsSidebarOpen(false)} className="text-slate-400 hover:text-white p-2">
@@ -199,7 +392,6 @@ const App: React.FC = () => {
         </aside>
       </div>
 
-      {/* 桌機版側邊欄 */}
       <aside className="hidden md:flex w-64 flex-col bg-slate-900 text-white flex-shrink-0">
         {renderSidebarContent()}
       </aside>
@@ -212,21 +404,17 @@ const App: React.FC = () => {
              </button>
              <div className="flex items-center text-sm">
                 <span className="font-bold text-slate-800">{selectedProject ? selectedProject.name : view}</span>
-                {dirHandle && <span className="ml-3 px-2 py-0.5 bg-green-100 text-green-700 text-[10px] rounded-full font-bold">已同步本機資料夾</span>}
-                {!dirHandle && <span className="ml-3 px-2 py-0.5 bg-slate-100 text-slate-500 text-[10px] rounded-full font-bold italic">瀏覽器暫存模式</span>}
              </div>
           </div>
           <div className="flex items-center gap-3">
-            <div className="text-right hidden sm:block">
-              <div className="text-sm font-bold text-slate-700">{currentUser.name}</div>
-            </div>
+            <div className="text-sm font-bold text-slate-700 hidden sm:block">{currentUser.name}</div>
             <div className="w-9 h-9 rounded-full bg-slate-100 flex items-center justify-center"><UserIcon className="w-5 h-5 text-slate-400" /></div>
           </div>
         </header>
 
         <main className="flex-1 overflow-auto bg-[#f8fafc] pb-safe">
           {view === 'users' ? (
-            <UserManagement users={allUsers} onUpdateUsers={setAllUsers} auditLogs={auditLogs} onLogAction={()=>{}} importUrl="" onUpdateImportUrl={()=>{}} />
+            <UserManagement users={allUsers} onUpdateUsers={setAllUsers} auditLogs={auditLogs} onLogAction={(action, details) => setAuditLogs(prev => [{ id: generateId(), userId: currentUser.id, userName: currentUser.name, action, details, timestamp: Date.now() }, ...prev])} importUrl={importUrl} onUpdateImportUrl={(url) => { setImportUrl(url); localStorage.setItem('hjx_import_url', url); }} projects={projects} onRestoreData={(data) => { setProjects(data.projects); setAllUsers(data.users); setAuditLogs(data.auditLogs); }} />
           ) : view === 'report' ? (
             <GlobalWorkReport projects={projects} currentUser={currentUser} onUpdateProject={handleUpdateProject} />
           ) : view === 'materials' ? (
