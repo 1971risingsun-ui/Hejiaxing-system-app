@@ -2,7 +2,7 @@
 <!DOCTYPE html>
 <html lang="zh-TW">
   <head>
-    <link rel="manifest" href="manifest.json">
+    <link rel="manifest" href="/Hejiaxing-system-app/manifest.json">
     <meta charset="UTF-8" />
     <!-- 啟用兩指縮放：明確設定 maximum-scale 為 5.0，確保 user-scalable 為 yes -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover" />
@@ -89,9 +89,14 @@
     <div id="root"></div>
     <!-- 修正：明確引入進入點檔案 -->
     <script type="module" src="/index.tsx"></script>
-    <script>
+<script>
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("./service-worker.js");
+  window.addEventListener("load", () => {
+    navigator.serviceWorker
+      .register("/Hejiaxing-system-app/service-worker.js")
+      .then(reg => console.log("✅ SW registered", reg.scope))
+      .catch(err => console.error("❌ SW failed", err));
+  });
 }
 </script>
 
