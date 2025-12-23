@@ -3,6 +3,7 @@
 <html lang="zh-TW">
   <head>
     <meta charset="UTF-8" />
+    <!-- 啟用兩指縮放：明確設定 maximum-scale 為 5.0，確保 user-scalable 為 yes -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -19,11 +20,14 @@
       :root {
         font-size: clamp(12px, 3.5vw, 16px);
       }
+
       html, body {
+        /* 明確允許兩指縮放與平移手勢 */
         touch-action: manipulation;
         min-height: 100%;
         -webkit-text-size-adjust: 100%;
       }
+
       body {
         font-family: 'Inter', sans-serif;
         background-color: #f3f4f6;
@@ -33,37 +37,51 @@
         padding-left: env(safe-area-inset-left);
         padding-right: env(safe-area-inset-right);
       }
+      
       input, textarea, [contenteditable], .selectable-text {
         -webkit-user-select: text;
         user-select: text;
       }
-      ::-webkit-scrollbar { width: 4px; height: 4px; }
-      ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
-      .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+      /* Custom scrollbar */
+      ::-webkit-scrollbar {
+        width: 4px;
+        height: 4px;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent; 
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #cbd5e1; 
+        border-radius: 4px;
+      }
+
+      .line-clamp-2 {
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
     </style>
   <script type="importmap">
 {
   "imports": {
-    "vite": "https://esm.sh/vite@^7.3.0",
-    "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2",
-    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
-    "react/": "https://esm.sh/react@^19.2.3/",
-    "react": "https://esm.sh/react@^19.2.3",
-    "@google/genai": "https://esm.sh/@google/genai@^1.34.0",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.30.0",
+    "react/": "https://aistudiocdn.com/react@^19.2.0/",
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
     "@capacitor/app": "https://esm.sh/@capacitor/app@^8.0.0",
-    "jszip": "https://esm.sh/jszip@^3.10.1",
+    "@capacitor/share": "https://esm.sh/@capacitor/share@^8.0.0",
     "@capacitor/core": "https://esm.sh/@capacitor/core@^8.0.0",
-    "exceljs": "https://esm.sh/exceljs@^4.4.0",
     "@capacitor/cli": "https://esm.sh/@capacitor/cli@^8.0.0",
     "@capacitor/filesystem": "https://esm.sh/@capacitor/filesystem@^8.0.0",
-    "@capacitor/share": "https://esm.sh/@capacitor/share@^8.0.0"
+    "exceljs": "https://esm.sh/exceljs@^4.4.0",
+    "jszip": "https://esm.sh/jszip@^3.10.1"
   }
 }
 </script>
 </head>
   <body>
     <div id="root"></div>
-    <!-- 明確指定進入點，這對 Vite 部署至 GitHub Pages 非常重要 -->
-    <script type="module" src="/index.tsx"></script>
   </body>
 </html>

@@ -1,16 +1,23 @@
-
-import { defineConfig } from 'vite';
+import path from 'path';
+import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 
-// https://vitejs.dev/config/
-export default defineConfig({
-  plugins: [react()],
-  // 這裡必須對應您的 GitHub 儲存庫名稱
-  // 如果您的網址是 https://username.github.io/hejiaxing-ai/
-  // 那麼 base 就要設為 '/hejiaxing-ai/'
-  base: '/hejiaxing-ai/',
-  build: {
-    outDir: 'dist',
-    assetsDir: 'assets',
-  }
+export default defineConfig(({ mode }) => {
+    const env = loadEnv(mode, '.', '');
+    return {
+      server: {
+        port: 3000,
+        host: '0.0.0.0',
+      },
+      plugins: [react()],
+      define: {
+        'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
+      },
+      resolve: {
+        alias: {
+          '@': path.resolve(__dirname, '.'),
+        }
+      }
+    };
 });
