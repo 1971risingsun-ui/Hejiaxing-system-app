@@ -1,22 +1,24 @@
-
 import { GoogleGenAI } from "@google/genai";
 
-// Guideline: Always use new GoogleGenAI({apiKey: process.env.API_KEY});
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
 export const analyzeConstructionPhoto = async (base64Image: string): Promise<string> => {
-  // Guideline: Assume process.env.API_KEY is pre-configured and valid.
+  // Fix: Create a new GoogleGenAI instance right before making an API call to ensure it uses the most up-to-date API key.
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+  // Fix: Extract pure base64 data and mimeType from Data URL if present.
+  // Standard file readers often include a 'data:image/jpeg;base64,' prefix which must be removed.
+  const base64Data = base64Image.includes(',') ? base64Image.split(',')[1] : base64Image;
+  const mimeType = base64Image.includes(';') ? base64Image.split(';')[0].split(':')[1] : 'image/jpeg';
   
   try {
     const response = await ai.models.generateContent({
-      // Guideline: Use 'gemini-3-flash-preview' for general text/multimodal tasks.
+      // Guideline: Use 'gemini-3-flash-preview' for multimodal analysis and general Q&A tasks.
       model: 'gemini-3-flash-preview', 
       contents: {
         parts: [
           {
             inlineData: {
-              mimeType: 'image/jpeg', // Assuming jpeg for simplicity, or detect from usage
-              data: base64Image
+              mimeType: mimeType,
+              data: base64Data
             }
           },
           {
