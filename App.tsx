@@ -10,8 +10,9 @@ import EditProjectModal from './components/EditProjectModal';
 import LoginScreen from './components/LoginScreen';
 import GlobalWorkReport from './components/GlobalWorkReport';
 import GlobalMaterials from './components/GlobalMaterials';
-import { HomeIcon, UserIcon, LogOutIcon, ShieldIcon, MenuIcon, XIcon, ChevronRightIcon, WrenchIcon, UploadIcon, LoaderIcon, ClipboardListIcon, LayoutGridIcon, BoxIcon, DownloadIcon, FileTextIcon, CheckCircleIcon, AlertIcon } from './components/Icons';
-import { getDirectoryHandle, saveDbToLocal, loadDbFromLocal, getHandleFromIdb, saveHandleToIdb, clearHandleFromIdb } from './utils/fileSystem';
+// Fix: Added XCircleIcon to the imported icons list.
+import { HomeIcon, UserIcon, LogOutIcon, ShieldIcon, MenuIcon, XIcon, ChevronRightIcon, WrenchIcon, UploadIcon, LoaderIcon, ClipboardListIcon, LayoutGridIcon, BoxIcon, DownloadIcon, FileTextIcon, CheckCircleIcon, AlertIcon, XCircleIcon } from './components/Icons';
+import { getDirectoryHandle, saveDbToLocal, loadDbFromLocal, getHandleFromIdb, clearHandleFromIdb } from './utils/fileSystem';
 import { downloadBlob } from './utils/fileHelpers';
 
 declare const ExcelJS: any;
@@ -73,18 +74,18 @@ const App: React.FC = () => {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() => getInitialData('auditLogs', []));
   const [importUrl, setImportUrl] = useState(() => localStorage.getItem('hjx_import_url') || '\\\\HJXSERVER\\App test\\上傳排程表.xlsx');
   
+  // 持久化資料夾控制柄
   const [dirHandle, setDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [dirPermission, setDirPermission] = useState<'granted' | 'prompt' | 'denied'>('prompt');
   const [isWorkspaceLoading, setIsWorkspaceLoading] = useState(false);
   const excelInputRef = useRef<HTMLInputElement>(null);
 
-  // 1. 初始化：嘗試回復資料夾連結
+  // 初始化：從 IndexedDB 恢復路徑 (不論登入與否)
   useEffect(() => {
     const restoreHandle = async () => {
       const savedHandle = await getHandleFromIdb();
       if (savedHandle) {
         setDirHandle(savedHandle);
-        // Fix: Cast to any to access File System Access API methods not yet in standard TS types
         const status = await (savedHandle as any).queryPermission({ mode: 'readwrite' });
         setDirPermission(status);
       }
@@ -101,7 +102,6 @@ const App: React.FC = () => {
     }
   };
 
-  // 重新連結或請求權限
   const connectWorkspace = async () => {
     setIsWorkspaceLoading(true);
     try {
@@ -113,46 +113,49 @@ const App: React.FC = () => {
         setDirHandle(handle);
       }
       
-      // 請求讀寫權限
+      // 請求讀寫權限 (此動作必須由使用者點擊觸發)
       const status = await (handle as any).requestPermission({ mode: 'readwrite' });
       setDirPermission(status);
 
       if (status === 'granted') {
         const savedData = await loadDbFromLocal(handle);
         if (savedData) {
-          const localLastSaved = localStorage.getItem('hjx_cache_lastSaved') || '';
-          const fileLastSaved = savedData.lastSaved || '';
+          // 智慧合併：只新增不刪除
+          // 如果 db.json 裡有的 ID，本地沒有 -> 新增到本地
+          // 如果本地有的 ID，db.json 沒有 -> 保留本地，晚點會同步寫入 db.json
+          const mergedProjects = [...projects];
+          let addedFromDbCount = 0;
 
-          // 智慧合併邏輯：如果資料夾內的專案 ID 在本地不存在，則新增，否則以較新者為準
-          if (localLastSaved && fileLastSaved) {
-            const mergedProjects = [...projects];
-            let mergeCount = 0;
+          (savedData.projects || []).forEach((fp: Project) => {
+            const exists = mergedProjects.some(lp => lp.id === fp.id);
+            if (!exists) {
+              mergedProjects.push(fp);
+              addedFromDbCount++;
+            }
+          });
 
-            (savedData.projects || []).forEach((fp: Project) => {
-                const existingIdx = mergedProjects.findIndex(lp => lp.id === fp.id);
-                if (existingIdx === -1) {
-                    mergedProjects.push(fp);
-                    mergeCount++;
-                } else if (fileLastSaved > localLastSaved) {
-                    mergedProjects[existingIdx] = fp;
-                }
-            });
-
-            if (mergeCount > 0) alert(`已合併資料夾中的 ${mergeCount} 筆新案件。`);
-            setProjects(sortProjects(mergedProjects));
-          } else {
-            setProjects(savedData.projects || []);
+          if (addedFromDbCount > 0) {
+            alert(`已從資料夾同步 ${addedFromDbCount} 筆新案件。`);
           }
 
+          setProjects(sortProjects(mergedProjects));
           if (savedData.users) setAllUsers(savedData.users);
           if (savedData.auditLogs) setAuditLogs(savedData.auditLogs);
-          localStorage.setItem('hjx_cache_lastSaved', fileLastSaved || new Date().toISOString());
+          
+          // 立即執行一次反向同步，確保 db.json 包含本地新資料
+          await syncToLocal(handle, { 
+            projects: mergedProjects, 
+            users: savedData.users || allUsers, 
+            auditLogs: savedData.auditLogs || auditLogs 
+          });
         } else {
+          // 如果檔案不存在，則建立
           await syncToLocal(handle, { projects, users: allUsers, auditLogs });
         }
       }
     } catch (e: any) {
       alert(e.message);
+      if (e.message.includes('權限')) setDirPermission('denied');
     } finally {
       setIsWorkspaceLoading(false);
     }
@@ -166,136 +169,75 @@ const App: React.FC = () => {
     });
   };
 
+  // Fix: Implement handleImportExcel to handle Excel file uploads.
   const handleImportExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (typeof ExcelJS === 'undefined') {
-        alert("Excel 模組尚未準備就緒，請檢查網路連線或稍後再試。");
-        return;
-    }
     const file = e.target.files?.[0];
     if (!file) return;
 
-    setIsWorkspaceLoading(true); 
+    setIsWorkspaceLoading(true);
     try {
-      const workbook = new ExcelJS.Workbook();
       const arrayBuffer = await file.arrayBuffer();
+      const workbook = new ExcelJS.Workbook();
       await workbook.xlsx.load(arrayBuffer);
-      const worksheet = workbook.worksheets[0];
+      const worksheet = workbook.getWorksheet(1);
+      
+      const newProjects: Project[] = [];
+      
+      worksheet.eachRow((row: any, rowNumber: number) => {
+        if (rowNumber === 1) return; // Skip header
 
-      const imagesByRow: Record<number, { name: string, buffer: Uint8Array, extension: string }[]> = {};
-      worksheet.getImages().forEach((image: any) => {
-        const imgData = workbook.model.media.find((m: any) => m.index === image.imageId);
-        const rowNum = Math.floor(image.range.tl.row) + 1;
-        if (imgData) {
-          if (!imagesByRow[rowNum]) imagesByRow[rowNum] = [];
-          imagesByRow[rowNum].push({
-            name: `excel_row${rowNum}_img${image.imageId}.${imgData.extension}`,
-            buffer: imgData.buffer,
-            extension: imgData.extension
-          });
+        const project: Project = {
+          id: generateId(),
+          type: ProjectType.CONSTRUCTION,
+          name: row.getCell(1).value?.toString() || '未命名專案',
+          clientName: row.getCell(2).value?.toString() || '',
+          clientContact: row.getCell(3).value?.toString() || '',
+          clientPhone: row.getCell(4).value?.toString() || '',
+          address: row.getCell(5).value?.toString() || '',
+          appointmentDate: parseExcelDate(row.getCell(6).value),
+          reportDate: parseExcelDate(row.getCell(7).value),
+          description: row.getCell(8).value?.toString() || '',
+          remarks: row.getCell(9).value?.toString() || '',
+          status: ProjectStatus.PLANNING,
+          progress: 0,
+          milestones: [],
+          photos: [],
+          materials: [],
+          reports: [],
+          attachments: [],
+          constructionItems: [],
+          constructionSignatures: [],
+          completionReports: []
+        };
+        
+        if (project.name && project.name !== '未命名專案') {
+          newProjects.push(project);
         }
       });
 
-      let headers: Record<string, number> = {};
-      const headerRow = worksheet.getRow(1);
-      headerRow.eachCell((cell: any, colNumber: number) => {
-        const val = String(cell.value || '').trim();
-        headers[val] = colNumber;
-      });
-
-      const nextProjects = [...projects];
-      let addedCount = 0;
-      let updatedCount = 0;
-
-      for (let i = 2; i <= worksheet.rowCount; i++) {
-        const row = worksheet.getRow(i);
-        const getVal = (key: string) => {
-          const colIdx = headers[key];
-          if (!colIdx) return '';
-          const val = row.getCell(colIdx).value;
-          if (val instanceof Date) return val;
-          if (val && typeof val === 'object') return (val as any).text || (val as any).result || '';
-          return val === null || val === undefined ? '' : val;
-        };
-
-        const projectName = String(getVal('客戶') || '').trim();
-        if (!projectName) continue;
-
-        const category = String(getVal('類別') || '').trim();
-        let projectType = ProjectType.CONSTRUCTION;
-        if (category.includes('維修')) projectType = ProjectType.MAINTENANCE;
-        else if (category.includes('組合屋')) projectType = ProjectType.MODULAR_HOUSE;
-
-        const appointmentDate = parseExcelDate(getVal('預約日期'));
-        const reportDate = parseExcelDate(getVal('報修日期'));
-
-        const rowImages = imagesByRow[i] || [];
-        const imageAttachments: Attachment[] = [];
-        for (const img of rowImages) {
-            const mimeType = img.extension === 'png' ? 'image/png' : 'image/jpeg';
-            const dataUrl = await bufferToBase64(img.buffer, mimeType);
-            imageAttachments.push({
-                id: generateId(),
-                name: img.name,
-                size: img.buffer.length,
-                type: mimeType,
-                url: dataUrl
-            });
-        }
-
-        const existingIdx = nextProjects.findIndex(p => p.name === projectName);
-        const projectData: Partial<Project> = {
-          type: projectType,
-          clientName: projectName.includes('-') ? projectName.split('-')[0].trim() : projectName,
-          address: String(getVal('地址') || '').trim(),
-          description: String(getVal('工程') || '').trim(),
-          clientContact: String(getVal('聯絡人') || '').trim(),
-          clientPhone: String(getVal('電話') || '').trim(),
-          remarks: String(getVal('備註') || '').trim(),
-          appointmentDate,
-          reportDate
-        };
-
-        if (existingIdx > -1) {
-          const existing = nextProjects[existingIdx];
-          const newAtts = imageAttachments.filter(na => !(existing.attachments || []).some(ea => na.name === ea.name));
-          nextProjects[existingIdx] = { 
-            ...existing, 
-            ...projectData,
-            attachments: [...(existing.attachments || []), ...newAtts]
-          };
-          updatedCount++;
-        } else {
-          nextProjects.push({
-            id: generateId(),
-            name: projectName,
-            type: projectType,
-            status: ProjectStatus.PLANNING,
-            progress: 0,
-            milestones: [],
-            photos: [],
-            materials: [],
-            reports: [],
-            constructionItems: [],
-            constructionSignatures: [],
-            completionReports: [],
-            attachments: imageAttachments,
-            ...projectData
-          } as Project);
-          addedCount++;
-        }
+      if (newProjects.length > 0) {
+        setProjects(prev => sortProjects([...newProjects, ...prev]));
+        alert(`成功匯入 ${newProjects.length} 筆案件`);
+        
+        setAuditLogs(prev => [{
+          id: generateId(),
+          userId: currentUser?.id || 'system',
+          userName: currentUser?.name || '系統',
+          action: 'IMPORT_EXCEL',
+          details: `匯入 Excel 排程表: ${file.name}, 共 ${newProjects.length} 筆`,
+          timestamp: Date.now()
+        }, ...prev]);
       }
-
-      setProjects(sortProjects(nextProjects));
-      alert(`匯入完成！\n新增: ${addedCount} 筆\n更新: ${updatedCount} 筆`);
-    } catch (err) {
-      console.error('Excel 匯入失敗:', err);
-      alert('解析失敗：檔案可能過大或欄位不符。');
+    } catch (error: any) {
+      console.error('Excel 匯入失敗', error);
+      alert('Excel 匯入失敗: ' + error.message);
     } finally {
       setIsWorkspaceLoading(false);
       if (excelInputRef.current) excelInputRef.current.value = '';
     }
   };
 
+  // 定期同步與快取
   useEffect(() => {
     const lastSaved = new Date().toISOString();
     const saveCache = () => {
@@ -310,6 +252,7 @@ const App: React.FC = () => {
     };
     saveCache();
     
+    // 只有在權限為 granted 時才自動同步寫入
     if (dirHandle && dirPermission === 'granted') {
         syncToLocal(dirHandle, { projects, users: allUsers, auditLogs });
     }
@@ -325,11 +268,11 @@ const App: React.FC = () => {
   const handleLogout = () => { 
     setCurrentUser(null); 
     setIsSidebarOpen(false); 
-    // 登出不中斷資料夾連結，以便下一位使用者或重新整理後能繼續使用
+    // 注意：登出不清除 dirHandle，這樣下次登入或重新整理後還能顯示「恢復連結」
   };
 
   const handleDeleteProject = (id: string) => {
-    if (window.confirm('確定要刪除此案件嗎？此動作將同步至資料夾 db.json。')) {
+    if (window.confirm('確定要刪除此案件嗎？此動作將同步刪除資料夾中的紀錄。')) {
       const newList = projects.filter(p => p.id !== id);
       setProjects(sortProjects(newList));
       
@@ -365,6 +308,7 @@ const App: React.FC = () => {
   const renderSidebarContent = () => {
     const isConnected = dirHandle && dirPermission === 'granted';
     const isPending = dirHandle && dirPermission === 'prompt';
+    const isDenied = dirHandle && dirPermission === 'denied';
 
     return (
       <>
@@ -375,31 +319,54 @@ const App: React.FC = () => {
         </div>
         <nav className="flex-1 px-4 space-y-2 overflow-y-auto no-scrollbar">
           <div className="space-y-3 mb-6">
+            {/* 動態狀態按鈕 */}
             <button 
               onClick={connectWorkspace}
               className={`flex items-center gap-3 px-4 py-3 rounded-xl w-full transition-all border ${
                 isConnected 
                   ? 'bg-green-600/10 border-green-500 text-green-400' 
-                  : isPending 
-                  ? 'bg-yellow-600/10 border-yellow-500 text-yellow-500 font-bold animate-pulse'
+                  : isPending || isDenied
+                  ? 'bg-orange-600/10 border-orange-500 text-orange-500 font-bold animate-pulse'
                   : 'bg-red-600/10 border-red-500 text-red-400 font-bold hover:bg-red-600/20'
               }`}
             >
               {isWorkspaceLoading ? <LoaderIcon className="w-5 h-5 animate-spin" /> : 
                isConnected ? <CheckCircleIcon className="w-5 h-5" /> : 
-               isPending ? <AlertIcon className="w-5 h-5" /> : <LayoutGridIcon className="w-5 h-5" />}
+               <AlertIcon className="w-5 h-5" />}
               <div className="flex flex-col items-start text-left">
                 <span className="text-sm font-bold">
-                    {isConnected ? '已同步連結 v1' : isPending ? '恢復連結 v1' : '連結本機資料夾'}
+                    {isConnected ? '已連結 db.json' : (isPending || isDenied) ? '恢復資料夾連結' : '連結本機資料夾'}
                 </span>
                 <span className="text-[10px] opacity-70">
-                    {isConnected ? '資料即時同步中' : isPending ? '點擊回復授權' : 'C:\\app test\\v1\\'}
+                    {isConnected ? '自動同步啟動中' : '點擊授權讀寫權限'}
                 </span>
               </div>
             </button>
+            
+            {/* 手動斷開按鈕 (僅管理員可見) */}
+            {isConnected && currentUser.role === UserRole.ADMIN && (
+                <button 
+                    onClick={async () => {
+                        if(confirm('要斷開資料夾連結嗎？(不影響本地暫存)')) {
+                            await clearHandleFromIdb();
+                            setDirHandle(null);
+                            setDirPermission('prompt');
+                        }
+                    }}
+                    className="text-[10px] text-slate-500 hover:text-red-400 px-4 flex items-center gap-1 transition-colors"
+                >
+                    <XCircleIcon className="w-3 h-3" /> 斷開連結控制柄
+                </button>
+            )}
 
-            <div className="px-1">
-              <input type="file" accept=".xlsx, .xls" ref={excelInputRef} className="hidden" onChange={handleImportExcel} />
+            <div className="px-1 pt-2">
+              <input type="file" accept=".xlsx, .xls" ref={excelInputRef} className="hidden" onChange={(e) => {
+                  // 如果未連結資料夾，提示使用者
+                  if (!isConnected) {
+                      if (!confirm('尚未連結資料夾，匯入的資料將僅儲存在瀏覽器暫存中。是否繼續？')) return;
+                  }
+                  handleImportExcel(e);
+              }} />
               <button 
                 onClick={() => excelInputRef.current?.click()}
                 disabled={isWorkspaceLoading}
