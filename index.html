@@ -2,12 +2,12 @@
 <!DOCTYPE html>
 <html lang="zh-TW">
   <head>
-    <link rel="manifest" href="/Hejiaxing-system-app/manifest.json">
     <meta charset="UTF-8" />
-    <!-- 啟用兩指縮放：明確設定 maximum-scale 為 5.0，確保 user-scalable 為 yes -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="theme-color" content="#0f172a" />
+    <link rel="apple-touch-icon" href="https://ui-avatars.com/api/?name=HJX&background=0f172a&color=fff&size=180" />
     
     <title>合家興 AI - 智慧建築專案管理</title>
     <script src="https://cdn.tailwindcss.com"></script>
@@ -23,7 +23,6 @@
       }
 
       html, body {
-        /* 明確允許兩指縮放與平移手勢 */
         touch-action: manipulation;
         min-height: 100%;
         -webkit-text-size-adjust: 100%;
@@ -44,7 +43,6 @@
         user-select: text;
       }
 
-      /* Custom scrollbar */
       ::-webkit-scrollbar {
         width: 4px;
         height: 4px;
@@ -79,26 +77,15 @@
     "exceljs": "https://esm.sh/exceljs@^4.4.0",
     "jszip": "https://esm.sh/jszip@^3.10.1",
     "vite": "https://esm.sh/vite@^7.3.0",
-    "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2"
+    "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2",
+    "vite-plugin-pwa": "https://esm.sh/vite-plugin-pwa@^1.2.0"
   }
 }
 </script>
-
+<link rel="stylesheet" href="/index.css">
 </head>
   <body>
     <div id="root"></div>
-    <!-- 修正：明確引入進入點檔案 -->
     <script type="module" src="/index.tsx"></script>
-<script>
-if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker
-      .register("/Hejiaxing-system-app/service-worker.js")
-      .then(reg => console.log("✅ SW registered", reg.scope))
-      .catch(err => console.error("❌ SW failed", err));
-  });
-}
-</script>
-
   </body>
 </html>
