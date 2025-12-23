@@ -1,0 +1,7 @@
+{
+  "name": "合家興 app",
+  "description": "A smart construction project management tool with AI-powered scheduling and site safety analysis.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
