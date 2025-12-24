@@ -43,12 +43,17 @@ const parseExcelDate = (val: any): string => {
   }
   const str = String(val).trim();
   if (!str) return '';
-  const dateMatch = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  // 處理 10/15/2024 或 2024/10/15 格式
+  const dateMatch = str.match(/^(\d{1,4})[/-](\d{1,2})[/-](\d{1,4})$/);
   if (dateMatch) {
-    let [_, m, d, y] = dateMatch;
-    if (y.length === 2) y = '20' + y;
-    return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+    let [_, p1, p2, p3] = dateMatch;
+    // 假設 YYYY/MM/DD
+    if (p1.length === 4) return `${p1}-${p2.padStart(2, '0')}-${p3.padStart(2, '0')}`;
+    // 假設 MM/DD/YYYY
+    if (p3.length === 4) return `${p3}-${p1.padStart(2, '0')}-${p2.padStart(2, '0')}`;
   }
+  
+  // Excel 數字日期處理
   if (!isNaN(Number(str)) && Number(str) > 30000) {
     const date = new Date(Math.round((Number(str) - 25569) * 86400 * 1000));
     return date.toISOString().split('T')[0];
@@ -74,13 +79,11 @@ const App: React.FC = () => {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() => getInitialData('auditLogs', []));
   const [importUrl, setImportUrl] = useState(() => localStorage.getItem('hjx_import_url') || '\\\\HJXSERVER\\App test\\上傳排程表.xlsx');
   
-  // 持久化資料夾控制柄
   const [dirHandle, setDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [dirPermission, setDirPermission] = useState<'granted' | 'prompt' | 'denied'>('prompt');
   const [isWorkspaceLoading, setIsWorkspaceLoading] = useState(false);
   const excelInputRef = useRef<HTMLInputElement>(null);
 
-  // 初始化：從 IndexedDB 恢復路徑 (不論登入與否)
   useEffect(() => {
     const restoreHandle = async () => {
       const savedHandle = await getHandleFromIdb();
@@ -106,26 +109,18 @@ const App: React.FC = () => {
     setIsWorkspaceLoading(true);
     try {
       let handle = dirHandle;
-      
-      // 如果完全沒連結過，或權限被拒絕，則開啟選擇器
       if (!handle || dirPermission === 'denied') {
         handle = await getDirectoryHandle();
         setDirHandle(handle);
       }
-      
-      // 請求讀寫權限 (此動作必須由使用者點擊觸發)
       const status = await (handle as any).requestPermission({ mode: 'readwrite' });
       setDirPermission(status);
 
       if (status === 'granted') {
         const savedData = await loadDbFromLocal(handle);
         if (savedData) {
-          // 智慧合併：只新增不刪除
-          // 如果 db.json 裡有的 ID，本地沒有 -> 新增到本地
-          // 如果本地有的 ID，db.json 沒有 -> 保留本地，晚點會同步寫入 db.json
           const mergedProjects = [...projects];
           let addedFromDbCount = 0;
-
           (savedData.projects || []).forEach((fp: Project) => {
             const exists = mergedProjects.some(lp => lp.id === fp.id);
             if (!exists) {
@@ -133,23 +128,12 @@ const App: React.FC = () => {
               addedFromDbCount++;
             }
           });
-
-          if (addedFromDbCount > 0) {
-            alert(`已從資料夾同步 ${addedFromDbCount} 筆新案件。`);
-          }
-
+          if (addedFromDbCount > 0) alert(`已從資料夾同步 ${addedFromDbCount} 筆新案件。`);
           setProjects(sortProjects(mergedProjects));
           if (savedData.users) setAllUsers(savedData.users);
           if (savedData.auditLogs) setAuditLogs(savedData.auditLogs);
-          
-          // 立即執行一次反向同步，確保 db.json 包含本地新資料
-          await syncToLocal(handle, { 
-            projects: mergedProjects, 
-            users: savedData.users || allUsers, 
-            auditLogs: savedData.auditLogs || auditLogs 
-          });
+          await syncToLocal(handle, { projects: mergedProjects, users: savedData.users || allUsers, auditLogs: savedData.auditLogs || auditLogs });
         } else {
-          // 如果檔案不存在，則建立
           await syncToLocal(handle, { projects, users: allUsers, auditLogs });
         }
       }
@@ -169,7 +153,6 @@ const App: React.FC = () => {
     });
   };
 
-  // Fix: Implement handleImportExcel to handle Excel file uploads.
   const handleImportExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -183,21 +166,43 @@ const App: React.FC = () => {
       
       const newProjects: Project[] = [];
       
+      // 1. 識別標題索引
+      const headers: Record<string, number> = {};
+      const firstRow = worksheet.getRow(1);
+      firstRow.eachCell((cell: any, colNumber: number) => {
+        const headerText = cell.value?.toString().trim();
+        if (headerText) headers[headerText] = colNumber;
+      });
+
+      // 輔助函式：根據名稱獲取單元格值
+      const getValByHeader = (row: any, headerName: string) => {
+        const idx = headers[headerName];
+        if (!idx) return null;
+        return row.getCell(idx).value;
+      };
+
+      // 2. 迭代資料列 (從第二列開始)
       worksheet.eachRow((row: any, rowNumber: number) => {
-        if (rowNumber === 1) return; // Skip header
+        if (rowNumber === 1) return;
+
+        const rawName = getValByHeader(row, '客戶')?.toString().trim() || '';
+        if (!rawName) return; // 客戶欄位為空則跳過
+
+        // 客戶名稱：解析 客戶 欄位中 - 前的文字
+        const clientName = rawName.includes('-') ? rawName.split('-')[0].trim() : rawName;
 
         const project: Project = {
           id: generateId(),
           type: ProjectType.CONSTRUCTION,
-          name: row.getCell(1).value?.toString() || '未命名專案',
-          clientName: row.getCell(2).value?.toString() || '',
-          clientContact: row.getCell(3).value?.toString() || '',
-          clientPhone: row.getCell(4).value?.toString() || '',
-          address: row.getCell(5).value?.toString() || '',
-          appointmentDate: parseExcelDate(row.getCell(6).value),
-          reportDate: parseExcelDate(row.getCell(7).value),
-          description: row.getCell(8).value?.toString() || '',
-          remarks: row.getCell(9).value?.toString() || '',
+          name: rawName, // 專案名稱：對應 Excel 的 客戶 欄位
+          clientName: clientName,
+          clientContact: getValByHeader(row, '聯絡人')?.toString() || '',
+          clientPhone: getValByHeader(row, '電話')?.toString() || '',
+          address: getValByHeader(row, '地址')?.toString() || '',
+          appointmentDate: parseExcelDate(getValByHeader(row, '預約日期')),
+          reportDate: parseExcelDate(getValByHeader(row, '報修日期')),
+          description: getValByHeader(row, '工程')?.toString() || '',
+          remarks: getValByHeader(row, '備註')?.toString() || '',
           status: ProjectStatus.PLANNING,
           progress: 0,
           milestones: [],
@@ -210,9 +215,7 @@ const App: React.FC = () => {
           completionReports: []
         };
         
-        if (project.name && project.name !== '未命名專案') {
-          newProjects.push(project);
-        }
+        newProjects.push(project);
       });
 
       if (newProjects.length > 0) {
@@ -227,6 +230,8 @@ const App: React.FC = () => {
           details: `匯入 Excel 排程表: ${file.name}, 共 ${newProjects.length} 筆`,
           timestamp: Date.now()
         }, ...prev]);
+      } else {
+        alert('找不到有效的資料列。請檢查 Excel 標題是否包含「客戶」、「預約日期」、「報修日期」等欄位。');
       }
     } catch (error: any) {
       console.error('Excel 匯入失敗', error);
@@ -237,7 +242,6 @@ const App: React.FC = () => {
     }
   };
 
-  // 定期同步與快取
   useEffect(() => {
     const lastSaved = new Date().toISOString();
     const saveCache = () => {
@@ -251,8 +255,6 @@ const App: React.FC = () => {
         }
     };
     saveCache();
-    
-    // 只有在權限為 granted 時才自動同步寫入
     if (dirHandle && dirPermission === 'granted') {
         syncToLocal(dirHandle, { projects, users: allUsers, auditLogs });
     }
@@ -265,17 +267,12 @@ const App: React.FC = () => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   const handleLogin = (user: User) => { setCurrentUser(user); setView('construction'); };
-  const handleLogout = () => { 
-    setCurrentUser(null); 
-    setIsSidebarOpen(false); 
-    // 注意：登出不清除 dirHandle，這樣下次登入或重新整理後還能顯示「恢復連結」
-  };
+  const handleLogout = () => { setCurrentUser(null); setIsSidebarOpen(false); };
 
   const handleDeleteProject = (id: string) => {
     if (window.confirm('確定要刪除此案件嗎？此動作將同步刪除資料夾中的紀錄。')) {
       const newList = projects.filter(p => p.id !== id);
       setProjects(sortProjects(newList));
-      
       const deletedProj = projects.find(p => p.id === id);
       setAuditLogs(prev => [{
         id: generateId(),
@@ -319,59 +316,26 @@ const App: React.FC = () => {
         </div>
         <nav className="flex-1 px-4 space-y-2 overflow-y-auto no-scrollbar">
           <div className="space-y-3 mb-6">
-            {/* 動態狀態按鈕 */}
             <button 
               onClick={connectWorkspace}
               className={`flex items-center gap-3 px-4 py-3 rounded-xl w-full transition-all border ${
-                isConnected 
-                  ? 'bg-green-600/10 border-green-500 text-green-400' 
-                  : isPending || isDenied
-                  ? 'bg-orange-600/10 border-orange-500 text-orange-500 font-bold animate-pulse'
-                  : 'bg-red-600/10 border-red-500 text-red-400 font-bold hover:bg-red-600/20'
+                isConnected ? 'bg-green-600/10 border-green-500 text-green-400' : isPending || isDenied ? 'bg-orange-600/10 border-orange-500 text-orange-500 font-bold animate-pulse' : 'bg-red-600/10 border-red-500 text-red-400 font-bold hover:bg-red-600/20'
               }`}
             >
-              {isWorkspaceLoading ? <LoaderIcon className="w-5 h-5 animate-spin" /> : 
-               isConnected ? <CheckCircleIcon className="w-5 h-5" /> : 
-               <AlertIcon className="w-5 h-5" />}
+              {isWorkspaceLoading ? <LoaderIcon className="w-5 h-5 animate-spin" /> : isConnected ? <CheckCircleIcon className="w-5 h-5" /> : <AlertIcon className="w-5 h-5" />}
               <div className="flex flex-col items-start text-left">
-                <span className="text-sm font-bold">
-                    {isConnected ? '已連結 db.json' : (isPending || isDenied) ? '恢復資料夾連結' : '連結本機資料夾'}
-                </span>
-                <span className="text-[10px] opacity-70">
-                    {isConnected ? '自動同步啟動中' : '點擊授權讀寫權限'}
-                </span>
+                <span className="text-sm font-bold">{isConnected ? '已連結 db.json' : (isPending || isDenied) ? '恢復資料夾連結' : '連結本機資料夾'}</span>
+                <span className="text-[10px] opacity-70">{isConnected ? '自動同步啟動中' : '點擊授權讀寫權限'}</span>
               </div>
             </button>
-            
-            {/* 手動斷開按鈕 (僅管理員可見) */}
             {isConnected && currentUser.role === UserRole.ADMIN && (
-                <button 
-                    onClick={async () => {
-                        if(confirm('要斷開資料夾連結嗎？(不影響本地暫存)')) {
-                            await clearHandleFromIdb();
-                            setDirHandle(null);
-                            setDirPermission('prompt');
-                        }
-                    }}
-                    className="text-[10px] text-slate-500 hover:text-red-400 px-4 flex items-center gap-1 transition-colors"
-                >
+                <button onClick={async () => { if(confirm('要斷開資料夾連結嗎？(不影響本地暫存)')) { await clearHandleFromIdb(); setDirHandle(null); setDirPermission('prompt'); } }} className="text-[10px] text-slate-500 hover:text-red-400 px-4 flex items-center gap-1 transition-colors">
                     <XCircleIcon className="w-3 h-3" /> 斷開連結控制柄
                 </button>
             )}
-
             <div className="px-1 pt-2">
-              <input type="file" accept=".xlsx, .xls" ref={excelInputRef} className="hidden" onChange={(e) => {
-                  // 如果未連結資料夾，提示使用者
-                  if (!isConnected) {
-                      if (!confirm('尚未連結資料夾，匯入的資料將僅儲存在瀏覽器暫存中。是否繼續？')) return;
-                  }
-                  handleImportExcel(e);
-              }} />
-              <button 
-                onClick={() => excelInputRef.current?.click()}
-                disabled={isWorkspaceLoading}
-                className="flex items-center gap-3 px-4 py-3 rounded-xl w-full transition-all bg-indigo-600/10 border border-indigo-500/30 text-indigo-400 hover:bg-indigo-600 hover:text-white group disabled:opacity-50"
-              >
+              <input type="file" accept=".xlsx, .xls" ref={excelInputRef} className="hidden" onChange={(e) => { if (!isConnected) { if (!confirm('尚未連結資料夾，匯入的資料將僅儲存在瀏覽器暫存中。是否繼續？')) return; } handleImportExcel(e); }} />
+              <button onClick={() => excelInputRef.current?.click()} disabled={isWorkspaceLoading} className="flex items-center gap-3 px-4 py-3 rounded-xl w-full transition-all bg-indigo-600/10 border border-indigo-500/30 text-indigo-400 hover:bg-indigo-600 hover:text-white group disabled:opacity-50">
                 <FileTextIcon className="w-5 h-5 group-hover:scale-110 transition-transform" />
                 <div className="flex flex-col items-start text-left">
                   <span className="text-sm font-bold">{isWorkspaceLoading ? '處理中...' : '匯入排程表'}</span>
@@ -379,7 +343,6 @@ const App: React.FC = () => {
               </button>
             </div>
           </div>
-
           <button onClick={() => { setSelectedProject(null); setView('construction'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'construction' && !selectedProject ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
             <HomeIcon className="w-5 h-5 flex-shrink-0" /> <span className="font-medium">圍籬總覽</span>
           </button>
@@ -395,14 +358,12 @@ const App: React.FC = () => {
           <button onClick={() => { setSelectedProject(null); setView('materials'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'materials' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
             <BoxIcon className="w-5 h-5 flex-shrink-0" /> <span className="font-medium">材料請購</span>
           </button>
-
           {currentUser.role === UserRole.ADMIN && (
              <button onClick={() => { setView('users'); setSelectedProject(null); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'users' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
                <ShieldIcon className="w-5 h-5 flex-shrink-0" /> <span className="font-medium">權限管理</span>
              </button>
           )}
         </nav>
-
         <div className="p-4 border-t border-slate-800 w-full mt-auto mb-safe">
           <button onClick={handleLogout} className="flex w-full items-center justify-center gap-2 px-4 py-3 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors text-sm bg-slate-800/50 border border-slate-700 active:scale-95">
             <LogOutIcon className="w-4 h-4" /> 登出
@@ -425,11 +386,9 @@ const App: React.FC = () => {
           {renderSidebarContent()}
         </aside>
       </div>
-
       <aside className="hidden md:flex w-64 flex-col bg-slate-900 text-white flex-shrink-0">
         {renderSidebarContent()}
       </aside>
-
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden relative">
         <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-6 shadow-sm z-20">
           <div className="flex items-center gap-4">
@@ -445,7 +404,6 @@ const App: React.FC = () => {
             <div className="w-9 h-9 rounded-full bg-slate-100 flex items-center justify-center"><UserIcon className="w-5 h-5 text-slate-400" /></div>
           </div>
         </header>
-
         <main className="flex-1 overflow-auto bg-[#f8fafc] pb-safe">
           {view === 'users' ? (
             <UserManagement users={allUsers} onUpdateUsers={setAllUsers} auditLogs={auditLogs} onLogAction={(action, details) => setAuditLogs(prev => [{ id: generateId(), userId: currentUser.id, userName: currentUser.name, action, details, timestamp: Date.now() }, ...prev])} importUrl={importUrl} onUpdateImportUrl={(url) => { setImportUrl(url); localStorage.setItem('hjx_import_url', url); }} projects={projects} onRestoreData={(data) => { setProjects(data.projects); setAllUsers(data.users); setAuditLogs(data.auditLogs); }} />
@@ -460,7 +418,6 @@ const App: React.FC = () => {
           )}
         </main>
       </div>
-
       {isAddModalOpen && <AddProjectModal onClose={() => setIsAddModalOpen(false)} onAdd={(p) => { setProjects(sortProjects([p, ...projects])); setIsAddModalOpen(false); }} defaultType={view === 'maintenance' ? ProjectType.MAINTENANCE : view === 'modular_house' ? ProjectType.MODULAR_HOUSE : ProjectType.CONSTRUCTION} />}
       {editingProject && <EditProjectModal project={editingProject} onClose={() => setEditingProject(null)} onSave={handleUpdateProject} />}
     </div>
