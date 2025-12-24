@@ -10,7 +10,6 @@ import EditProjectModal from './components/EditProjectModal';
 import LoginScreen from './components/LoginScreen';
 import GlobalWorkReport from './components/GlobalWorkReport';
 import GlobalMaterials from './components/GlobalMaterials';
-// Fix: Added XCircleIcon to the imported icons list.
 import { HomeIcon, UserIcon, LogOutIcon, ShieldIcon, MenuIcon, XIcon, ChevronRightIcon, WrenchIcon, UploadIcon, LoaderIcon, ClipboardListIcon, LayoutGridIcon, BoxIcon, DownloadIcon, FileTextIcon, CheckCircleIcon, AlertIcon, XCircleIcon } from './components/Icons';
 import { getDirectoryHandle, saveDbToLocal, loadDbFromLocal, getHandleFromIdb, clearHandleFromIdb } from './utils/fileSystem';
 import { downloadBlob } from './utils/fileHelpers';
@@ -26,13 +25,14 @@ export const generateId = () => {
   return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
 };
 
-const bufferToBase64 = (buffer: Uint8Array, mimeType: string): Promise<string> => {
-  return new Promise((resolve) => {
-    const blob = new Blob([buffer as any], { type: mimeType });
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result as string);
-    reader.readAsDataURL(blob);
-  });
+// 優化：直接從 Buffer 轉 Base64 以保持原始品質且不壓縮
+const bufferToBase64 = (buffer: ArrayBuffer, mimeType: string): string => {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return `data:${mimeType};base64,${btoa(binary)}`;
 };
 
 const parseExcelDate = (val: any): string => {
@@ -43,17 +43,12 @@ const parseExcelDate = (val: any): string => {
   }
   const str = String(val).trim();
   if (!str) return '';
-  // 處理 10/15/2024 或 2024/10/15 格式
   const dateMatch = str.match(/^(\d{1,4})[/-](\d{1,2})[/-](\d{1,4})$/);
   if (dateMatch) {
     let [_, p1, p2, p3] = dateMatch;
-    // 假設 YYYY/MM/DD
     if (p1.length === 4) return `${p1}-${p2.padStart(2, '0')}-${p3.padStart(2, '0')}`;
-    // 假設 MM/DD/YYYY
     if (p3.length === 4) return `${p3}-${p1.padStart(2, '0')}-${p2.padStart(2, '0')}`;
   }
-  
-  // Excel 數字日期處理
   if (!isNaN(Number(str)) && Number(str) > 30000) {
     const date = new Date(Math.round((Number(str) - 25569) * 86400 * 1000));
     return date.toISOString().split('T')[0];
@@ -182,14 +177,23 @@ const App: React.FC = () => {
         return row.getCell(idx).value;
       };
 
-      // 2. 迭代資料列 (從第二列開始)
+      // 2. 預處理 Excel 內的所有圖片與其所在列數
+      // worksheet.getImages() 回傳的 tl (top-left) row 是 0-indexed
+      const excelImages = worksheet.getImages();
+      const imagesByRow: Record<number, any[]> = {};
+      excelImages.forEach((imgMeta: any) => {
+        const rowIdx = Math.floor(imgMeta.range.tl.row) + 1; // 轉為 1-indexed 以匹配 rowNumber
+        if (!imagesByRow[rowIdx]) imagesByRow[rowIdx] = [];
+        imagesByRow[rowIdx].push(imgMeta);
+      });
+
+      // 3. 迭代資料列 (從第二列開始)
       worksheet.eachRow((row: any, rowNumber: number) => {
         if (rowNumber === 1) return;
 
         const rawName = getValByHeader(row, '客戶')?.toString().trim() || '';
         if (!rawName) return; 
 
-        // 判斷類別以設定 ProjectType
         const categoryStr = getValByHeader(row, '類別')?.toString() || '';
         let projectType = ProjectType.CONSTRUCTION;
         if (categoryStr.includes('維修')) {
@@ -198,13 +202,28 @@ const App: React.FC = () => {
           projectType = ProjectType.MODULAR_HOUSE;
         }
 
-        // 客戶名稱：解析 客戶 欄位中 - 前的文字
         const clientName = rawName.includes('-') ? rawName.split('-')[0].trim() : rawName;
-
-        // 檢查是否已有相同名稱的專案 (同名覆蓋)
         const existingIdx = currentProjects.findIndex(p => p.name === rawName);
         
-        const projectData: Partial<Project> = {
+        // 提取當前列的圖片
+        const rowImages = imagesByRow[rowNumber] || [];
+        const newAttachments: Attachment[] = [];
+        rowImages.forEach((imgMeta: any, idx: number) => {
+          const img = workbook.getImage(imgMeta.imageId);
+          if (img) {
+            const mimeType = `image/${img.extension}`;
+            const base64 = bufferToBase64(img.buffer, mimeType);
+            newAttachments.push({
+              id: `excel-img-${rowNumber}-${idx}-${Date.now()}`,
+              name: `匯入圖片_${rowNumber}_${idx}.${img.extension}`,
+              size: img.buffer.byteLength,
+              type: mimeType,
+              url: base64
+            });
+          }
+        });
+
+        const projectUpdateData: Partial<Project> = {
           name: rawName,
           type: projectType,
           clientName: clientName,
@@ -218,10 +237,21 @@ const App: React.FC = () => {
         };
 
         if (existingIdx !== -1) {
-          // 覆蓋現有專案
+          // 覆蓋現有專案 (Upsert)
+          const existingProject = currentProjects[existingIdx];
+          
+          // 合併附件：保留原本手動上傳的，但加入 Excel 抓到的新附件
+          const mergedAttachments = [...(existingProject.attachments || [])];
+          newAttachments.forEach(na => {
+              if (!mergedAttachments.some(ma => ma.name === na.name && ma.size === na.size)) {
+                  mergedAttachments.push(na);
+              }
+          });
+
           currentProjects[existingIdx] = {
-            ...currentProjects[existingIdx],
-            ...projectData
+            ...existingProject,
+            ...projectUpdateData,
+            attachments: mergedAttachments
           };
           updateCount++;
         } else {
@@ -234,11 +264,11 @@ const App: React.FC = () => {
             photos: [],
             materials: [],
             reports: [],
-            attachments: [],
             constructionItems: [],
             constructionSignatures: [],
             completionReports: [],
-            ...(projectData as Project)
+            attachments: newAttachments,
+            ...(projectUpdateData as Project)
           };
           currentProjects.push(newProject);
           newCount++;
@@ -247,18 +277,18 @@ const App: React.FC = () => {
 
       if (newCount > 0 || updateCount > 0) {
         setProjects(sortProjects(currentProjects));
-        alert(`匯入完成！\n新增：${newCount} 筆\n更新(同名覆蓋)：${updateCount} 筆`);
+        alert(`匯入完成！\n新增：${newCount} 筆\n更新(同名覆蓋)：${updateCount} 筆\n(Excel 缺失之案件已保留未刪除)`);
         
         setAuditLogs(prev => [{
           id: generateId(),
           userId: currentUser?.id || 'system',
           userName: currentUser?.name || '系統',
           action: 'IMPORT_EXCEL',
-          details: `匯入 Excel: ${file.name}, 新增 ${newCount}, 更新 ${updateCount}`,
+          details: `匯入 Excel: ${file.name}, 新增 ${newCount}, 更新 ${updateCount}, 含原始品質圖片匯入。`,
           timestamp: Date.now()
         }, ...prev]);
       } else {
-        alert('找不到有效的資料列。請檢查 Excel 標題。');
+        alert('找不到有效的資料列。請檢查 Excel 標題欄位（客戶、類別等）。');
       }
     } catch (error: any) {
       console.error('Excel 匯入失敗', error);
