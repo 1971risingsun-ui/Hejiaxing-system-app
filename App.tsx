@@ -164,7 +164,9 @@ const App: React.FC = () => {
       await workbook.xlsx.load(arrayBuffer);
       const worksheet = workbook.getWorksheet(1);
       
-      const newProjects: Project[] = [];
+      const currentProjects = [...projects];
+      let newCount = 0;
+      let updateCount = 0;
       
       // 1. 識別標題索引
       const headers: Record<string, number> = {};
@@ -174,7 +176,6 @@ const App: React.FC = () => {
         if (headerText) headers[headerText] = colNumber;
       });
 
-      // 輔助函式：根據名稱獲取單元格值
       const getValByHeader = (row: any, headerName: string) => {
         const idx = headers[headerName];
         if (!idx) return null;
@@ -186,15 +187,26 @@ const App: React.FC = () => {
         if (rowNumber === 1) return;
 
         const rawName = getValByHeader(row, '客戶')?.toString().trim() || '';
-        if (!rawName) return; // 客戶欄位為空則跳過
+        if (!rawName) return; 
+
+        // 判斷類別以設定 ProjectType
+        const categoryStr = getValByHeader(row, '類別')?.toString() || '';
+        let projectType = ProjectType.CONSTRUCTION;
+        if (categoryStr.includes('維修')) {
+          projectType = ProjectType.MAINTENANCE;
+        } else if (categoryStr.includes('組合屋')) {
+          projectType = ProjectType.MODULAR_HOUSE;
+        }
 
         // 客戶名稱：解析 客戶 欄位中 - 前的文字
         const clientName = rawName.includes('-') ? rawName.split('-')[0].trim() : rawName;
 
-        const project: Project = {
-          id: generateId(),
-          type: ProjectType.CONSTRUCTION,
-          name: rawName, // 專案名稱：對應 Excel 的 客戶 欄位
+        // 檢查是否已有相同名稱的專案 (同名覆蓋)
+        const existingIdx = currentProjects.findIndex(p => p.name === rawName);
+        
+        const projectData: Partial<Project> = {
+          name: rawName,
+          type: projectType,
           clientName: clientName,
           clientContact: getValByHeader(row, '聯絡人')?.toString() || '',
           clientPhone: getValByHeader(row, '電話')?.toString() || '',
@@ -203,35 +215,50 @@ const App: React.FC = () => {
           reportDate: parseExcelDate(getValByHeader(row, '報修日期')),
           description: getValByHeader(row, '工程')?.toString() || '',
           remarks: getValByHeader(row, '備註')?.toString() || '',
-          status: ProjectStatus.PLANNING,
-          progress: 0,
-          milestones: [],
-          photos: [],
-          materials: [],
-          reports: [],
-          attachments: [],
-          constructionItems: [],
-          constructionSignatures: [],
-          completionReports: []
         };
-        
-        newProjects.push(project);
+
+        if (existingIdx !== -1) {
+          // 覆蓋現有專案
+          currentProjects[existingIdx] = {
+            ...currentProjects[existingIdx],
+            ...projectData
+          };
+          updateCount++;
+        } else {
+          // 新增專案
+          const newProject: Project = {
+            id: generateId(),
+            status: ProjectStatus.PLANNING,
+            progress: 0,
+            milestones: [],
+            photos: [],
+            materials: [],
+            reports: [],
+            attachments: [],
+            constructionItems: [],
+            constructionSignatures: [],
+            completionReports: [],
+            ...(projectData as Project)
+          };
+          currentProjects.push(newProject);
+          newCount++;
+        }
       });
 
-      if (newProjects.length > 0) {
-        setProjects(prev => sortProjects([...newProjects, ...prev]));
-        alert(`成功匯入 ${newProjects.length} 筆案件`);
+      if (newCount > 0 || updateCount > 0) {
+        setProjects(sortProjects(currentProjects));
+        alert(`匯入完成！\n新增：${newCount} 筆\n更新(同名覆蓋)：${updateCount} 筆`);
         
         setAuditLogs(prev => [{
           id: generateId(),
           userId: currentUser?.id || 'system',
           userName: currentUser?.name || '系統',
           action: 'IMPORT_EXCEL',
-          details: `匯入 Excel 排程表: ${file.name}, 共 ${newProjects.length} 筆`,
+          details: `匯入 Excel: ${file.name}, 新增 ${newCount}, 更新 ${updateCount}`,
           timestamp: Date.now()
         }, ...prev]);
       } else {
-        alert('找不到有效的資料列。請檢查 Excel 標題是否包含「客戶」、「預約日期」、「報修日期」等欄位。');
+        alert('找不到有效的資料列。請檢查 Excel 標題。');
       }
     } catch (error: any) {
       console.error('Excel 匯入失敗', error);
