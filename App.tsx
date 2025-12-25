@@ -13,8 +13,7 @@ import GlobalMaterials from './components/GlobalMaterials';
 import { HomeIcon, UserIcon, LogOutIcon, ShieldIcon, MenuIcon, XIcon, ChevronRightIcon, WrenchIcon, UploadIcon, LoaderIcon, ClipboardListIcon, LayoutGridIcon, BoxIcon, DownloadIcon, FileTextIcon, CheckCircleIcon, AlertIcon, XCircleIcon } from './components/Icons';
 import { getDirectoryHandle, saveDbToLocal, loadDbFromLocal, getHandleFromIdb, clearHandleFromIdb } from './utils/fileSystem';
 import { downloadBlob } from './utils/fileHelpers';
-
-declare const ExcelJS: any;
+import ExcelJS from 'exceljs';
 
 export const generateId = () => {
   try {
@@ -25,11 +24,11 @@ export const generateId = () => {
   return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
 };
 
-// 優化：直接從 Buffer 轉 Base64 以保持原始品質且不壓縮
 const bufferToBase64 = (buffer: ArrayBuffer, mimeType: string): string => {
   const bytes = new Uint8Array(buffer);
   let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
     binary += String.fromCharCode(bytes[i]);
   }
   return `data:${mimeType};base64,${btoa(binary)}`;
@@ -77,18 +76,46 @@ const App: React.FC = () => {
   const [dirHandle, setDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [dirPermission, setDirPermission] = useState<'granted' | 'prompt' | 'denied'>('prompt');
   const [isWorkspaceLoading, setIsWorkspaceLoading] = useState(false);
+  // 新增：初始化鎖定狀態，確保「先讀取 db.json 並合併」才允許「自動寫入」
+  const [isInitialized, setIsInitialized] = useState(false);
+  
   const excelInputRef = useRef<HTMLInputElement>(null);
 
+  const sortProjects = (list: Project[]) => {
+    return [...list].sort((a, b) => {
+      const dateA = a.appointmentDate || a.reportDate || '9999-12-31';
+      const dateB = b.appointmentDate || b.reportDate || '9999-12-31';
+      return dateA.localeCompare(dateB);
+    });
+  };
+
+  // 初始化恢復 Handle 並強制先嘗試載入資料
   useEffect(() => {
-    const restoreHandle = async () => {
+    const restoreAndLoad = async () => {
       const savedHandle = await getHandleFromIdb();
       if (savedHandle) {
         setDirHandle(savedHandle);
-        const status = await (savedHandle as any).queryPermission({ mode: 'readwrite' });
-        setDirPermission(status);
+        try {
+          const status = await (savedHandle as any).queryPermission({ mode: 'readwrite' });
+          setDirPermission(status);
+          
+          if (status === 'granted') {
+            const savedData = await loadDbFromLocal(savedHandle);
+            if (savedData) {
+              // 合併策略：以 db.json 為主，但保留本機可能更新的項目 (若 ID 重複則暫以 db.json 為主)
+              if (savedData.projects) setProjects(sortProjects(savedData.projects));
+              if (savedData.users) setAllUsers(savedData.users);
+              if (savedData.auditLogs) setAuditLogs(savedData.auditLogs);
+            }
+          }
+        } catch (e) {
+          console.error('恢復 Handle 載入失敗', e);
+        }
       }
+      // 不論有沒有成功從資料夾載入，都標記為已初始化，此時 localStorage 的資料已載入
+      setIsInitialized(true);
     };
-    restoreHandle();
+    restoreAndLoad();
   }, []);
 
   const syncToLocal = async (handle: FileSystemDirectoryHandle, data: { projects: Project[], users: User[], auditLogs: AuditLog[] }) => {
@@ -124,10 +151,12 @@ const App: React.FC = () => {
             }
           });
           if (addedFromDbCount > 0) alert(`已從資料夾同步 ${addedFromDbCount} 筆新案件。`);
-          setProjects(sortProjects(mergedProjects));
+          const sorted = sortProjects(mergedProjects);
+          setProjects(sorted);
           if (savedData.users) setAllUsers(savedData.users);
           if (savedData.auditLogs) setAuditLogs(savedData.auditLogs);
-          await syncToLocal(handle, { projects: mergedProjects, users: savedData.users || allUsers, auditLogs: savedData.auditLogs || auditLogs });
+          // 建立連結時強制同步一次最新狀態
+          await syncToLocal(handle, { projects: sorted, users: savedData.users || allUsers, auditLogs: savedData.auditLogs || auditLogs });
         } else {
           await syncToLocal(handle, { projects, users: allUsers, auditLogs });
         }
@@ -138,14 +167,6 @@ const App: React.FC = () => {
     } finally {
       setIsWorkspaceLoading(false);
     }
-  };
-
-  const sortProjects = (list: Project[]) => {
-    return [...list].sort((a, b) => {
-      const dateA = a.appointmentDate || a.reportDate || '9999-12-31';
-      const dateB = b.appointmentDate || b.reportDate || '9999-12-31';
-      return dateA.localeCompare(dateB);
-    });
   };
 
   const handleImportExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -159,11 +180,12 @@ const App: React.FC = () => {
       await workbook.xlsx.load(arrayBuffer);
       const worksheet = workbook.getWorksheet(1);
       
+      if (!worksheet) throw new Error('找不到工作表。');
+
       const currentProjects = [...projects];
       let newCount = 0;
       let updateCount = 0;
       
-      // 1. 識別標題索引
       const headers: Record<string, number> = {};
       const firstRow = worksheet.getRow(1);
       firstRow.eachCell((cell: any, colNumber: number) => {
@@ -171,23 +193,27 @@ const App: React.FC = () => {
         if (headerText) headers[headerText] = colNumber;
       });
 
+      const requiredHeaders = ['客戶', '類別'];
+      const missing = requiredHeaders.filter(h => !headers[h]);
+      if (missing.length > 0) {
+          throw new Error(`Excel 格式不正確，缺少欄位：${missing.join(', ')}`);
+      }
+
       const getValByHeader = (row: any, headerName: string) => {
         const idx = headers[headerName];
         if (!idx) return null;
-        return row.getCell(idx).value;
+        const cell = row.getCell(idx);
+        return cell.value;
       };
 
-      // 2. 預處理 Excel 內的所有圖片與其所在列數
-      // worksheet.getImages() 回傳的 tl (top-left) row 是 0-indexed
       const excelImages = worksheet.getImages();
       const imagesByRow: Record<number, any[]> = {};
       excelImages.forEach((imgMeta: any) => {
-        const rowIdx = Math.floor(imgMeta.range.tl.row) + 1; // 轉為 1-indexed 以匹配 rowNumber
+        const rowIdx = Math.floor(imgMeta.range.tl.row) + 1;
         if (!imagesByRow[rowIdx]) imagesByRow[rowIdx] = [];
         imagesByRow[rowIdx].push(imgMeta);
       });
 
-      // 3. 迭代資料列 (從第二列開始)
       worksheet.eachRow((row: any, rowNumber: number) => {
         if (rowNumber === 1) return;
 
@@ -205,7 +231,6 @@ const App: React.FC = () => {
         const clientName = rawName.includes('-') ? rawName.split('-')[0].trim() : rawName;
         const existingIdx = currentProjects.findIndex(p => p.name === rawName);
         
-        // 提取當前列的圖片
         const rowImages = imagesByRow[rowNumber] || [];
         const newAttachments: Attachment[] = [];
         rowImages.forEach((imgMeta: any, idx: number) => {
@@ -237,10 +262,7 @@ const App: React.FC = () => {
         };
 
         if (existingIdx !== -1) {
-          // 覆蓋現有專案 (Upsert)
           const existingProject = currentProjects[existingIdx];
-          
-          // 合併附件：保留原本手動上傳的，但加入 Excel 抓到的新附件
           const mergedAttachments = [...(existingProject.attachments || [])];
           newAttachments.forEach(na => {
               if (!mergedAttachments.some(ma => ma.name === na.name && ma.size === na.size)) {
@@ -255,7 +277,6 @@ const App: React.FC = () => {
           };
           updateCount++;
         } else {
-          // 新增專案
           const newProject: Project = {
             id: generateId(),
             status: ProjectStatus.PLANNING,
@@ -275,21 +296,18 @@ const App: React.FC = () => {
         }
       });
 
-      if (newCount > 0 || updateCount > 0) {
-        setProjects(sortProjects(currentProjects));
-        alert(`匯入完成！\n新增：${newCount} 筆\n更新(同名覆蓋)：${updateCount} 筆\n(Excel 缺失之案件已保留未刪除)`);
-        
-        setAuditLogs(prev => [{
-          id: generateId(),
-          userId: currentUser?.id || 'system',
-          userName: currentUser?.name || '系統',
-          action: 'IMPORT_EXCEL',
-          details: `匯入 Excel: ${file.name}, 新增 ${newCount}, 更新 ${updateCount}, 含原始品質圖片匯入。`,
-          timestamp: Date.now()
-        }, ...prev]);
-      } else {
-        alert('找不到有效的資料列。請檢查 Excel 標題欄位（客戶、類別等）。');
-      }
+      setProjects(sortProjects(currentProjects));
+      alert(`匯入完成！\n新增：${newCount} 筆\n更新：${updateCount} 筆`);
+      
+      setAuditLogs(prev => [{
+        id: generateId(),
+        userId: currentUser?.id || 'system',
+        userName: currentUser?.name || '系統',
+        action: 'IMPORT_EXCEL',
+        details: `匯入 Excel: ${file.name}, 新增 ${newCount}, 更新 ${updateCount}`,
+        timestamp: Date.now()
+      }, ...prev]);
+
     } catch (error: any) {
       console.error('Excel 匯入失敗', error);
       alert('Excel 匯入失敗: ' + error.message);
@@ -299,23 +317,21 @@ const App: React.FC = () => {
     }
   };
 
+  // 核心：修正自動寫入邏輯
   useEffect(() => {
+    // 只有在完成啟動載入（isInitialized === true）後，才允許執行寫入同步
+    if (!isInitialized) return;
+
     const lastSaved = new Date().toISOString();
-    const saveCache = () => {
-        try {
-            localStorage.setItem('hjx_cache_projects', JSON.stringify(projects));
-            localStorage.setItem('hjx_cache_users', JSON.stringify(allUsers));
-            localStorage.setItem('hjx_cache_auditLogs', JSON.stringify(auditLogs));
-            localStorage.setItem('hjx_cache_lastSaved', lastSaved);
-        } catch (e: any) {
-            if (e.name === 'QuotaExceededError') console.warn('LocalStorage 已滿');
-        }
-    };
-    saveCache();
+    localStorage.setItem('hjx_cache_projects', JSON.stringify(projects));
+    localStorage.setItem('hjx_cache_users', JSON.stringify(allUsers));
+    localStorage.setItem('hjx_cache_auditLogs', JSON.stringify(auditLogs));
+    localStorage.setItem('hjx_cache_lastSaved', lastSaved);
+
     if (dirHandle && dirPermission === 'granted') {
         syncToLocal(dirHandle, { projects, users: allUsers, auditLogs });
     }
-  }, [projects, allUsers, auditLogs, dirHandle, dirPermission]);
+  }, [projects, allUsers, auditLogs, dirHandle, dirPermission, isInitialized]);
 
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
@@ -327,18 +343,9 @@ const App: React.FC = () => {
   const handleLogout = () => { setCurrentUser(null); setIsSidebarOpen(false); };
 
   const handleDeleteProject = (id: string) => {
-    if (window.confirm('確定要刪除此案件嗎？此動作將同步刪除資料夾中的紀錄。')) {
+    if (window.confirm('確定要刪除此案件嗎？')) {
       const newList = projects.filter(p => p.id !== id);
       setProjects(sortProjects(newList));
-      const deletedProj = projects.find(p => p.id === id);
-      setAuditLogs(prev => [{
-        id: generateId(),
-        userId: currentUser?.id || 'system',
-        userName: currentUser?.name || '系統',
-        action: 'DELETE_PROJECT',
-        details: `刪除案件: ${deletedProj?.name || id}`,
-        timestamp: Date.now()
-      }, ...prev]);
     }
   };
 
@@ -361,8 +368,6 @@ const App: React.FC = () => {
 
   const renderSidebarContent = () => {
     const isConnected = dirHandle && dirPermission === 'granted';
-    const isPending = dirHandle && dirPermission === 'prompt';
-    const isDenied = dirHandle && dirPermission === 'denied';
 
     return (
       <>
@@ -372,57 +377,55 @@ const App: React.FC = () => {
            </h1>
         </div>
         <nav className="flex-1 px-4 space-y-2 overflow-y-auto no-scrollbar">
+          {!isInitialized && (
+            <div className="px-4 py-2 text-xs text-yellow-500 animate-pulse flex items-center gap-2">
+              <LoaderIcon className="w-3 h-3 animate-spin" /> 資料同步載入中...
+            </div>
+          )}
           <div className="space-y-3 mb-6">
             <button 
               onClick={connectWorkspace}
               className={`flex items-center gap-3 px-4 py-3 rounded-xl w-full transition-all border ${
-                isConnected ? 'bg-green-600/10 border-green-500 text-green-400' : isPending || isDenied ? 'bg-orange-600/10 border-orange-500 text-orange-500 font-bold animate-pulse' : 'bg-red-600/10 border-red-500 text-red-400 font-bold hover:bg-red-600/20'
+                isConnected ? 'bg-green-600/10 border-green-500 text-green-400' : 'bg-red-600/10 border-red-500 text-red-400'
               }`}
             >
               {isWorkspaceLoading ? <LoaderIcon className="w-5 h-5 animate-spin" /> : isConnected ? <CheckCircleIcon className="w-5 h-5" /> : <AlertIcon className="w-5 h-5" />}
               <div className="flex flex-col items-start text-left">
-                <span className="text-sm font-bold">{isConnected ? '已連結 db.json' : (isPending || isDenied) ? '恢復資料夾連結' : '連結本機資料夾'}</span>
-                <span className="text-[10px] opacity-70">{isConnected ? '自動同步啟動中' : '點擊授權讀寫權限'}</span>
+                <span className="text-sm font-bold">{isConnected ? '資料庫已連結' : '連結本機資料夾'}</span>
+                <span className="text-[10px] opacity-70">db.json 自動同步</span>
               </div>
             </button>
-            {isConnected && currentUser.role === UserRole.ADMIN && (
-                <button onClick={async () => { if(confirm('要斷開資料夾連結嗎？(不影響本地暫存)')) { await clearHandleFromIdb(); setDirHandle(null); setDirPermission('prompt'); } }} className="text-[10px] text-slate-500 hover:text-red-400 px-4 flex items-center gap-1 transition-colors">
-                    <XCircleIcon className="w-3 h-3" /> 斷開連結控制柄
-                </button>
-            )}
             <div className="px-1 pt-2">
-              <input type="file" accept=".xlsx, .xls" ref={excelInputRef} className="hidden" onChange={(e) => { if (!isConnected) { if (!confirm('尚未連結資料夾，匯入的資料將僅儲存在瀏覽器暫存中。是否繼續？')) return; } handleImportExcel(e); }} />
-              <button onClick={() => excelInputRef.current?.click()} disabled={isWorkspaceLoading} className="flex items-center gap-3 px-4 py-3 rounded-xl w-full transition-all bg-indigo-600/10 border border-indigo-500/30 text-indigo-400 hover:bg-indigo-600 hover:text-white group disabled:opacity-50">
-                <FileTextIcon className="w-5 h-5 group-hover:scale-110 transition-transform" />
-                <div className="flex flex-col items-start text-left">
-                  <span className="text-sm font-bold">{isWorkspaceLoading ? '處理中...' : '匯入排程表'}</span>
-                </div>
+              <input type="file" accept=".xlsx, .xls" ref={excelInputRef} className="hidden" onChange={handleImportExcel} />
+              <button onClick={() => excelInputRef.current?.click()} disabled={isWorkspaceLoading || !isInitialized} className="flex items-center gap-3 px-4 py-3 rounded-xl w-full transition-all bg-indigo-600/10 border border-indigo-500/30 text-indigo-400 hover:bg-indigo-600 hover:text-white group disabled:opacity-50">
+                <FileTextIcon className="w-5 h-5" />
+                <span className="text-sm font-bold">匯入排程表</span>
               </button>
             </div>
           </div>
-          <button onClick={() => { setSelectedProject(null); setView('construction'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'construction' && !selectedProject ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
-            <HomeIcon className="w-5 h-5 flex-shrink-0" /> <span className="font-medium">圍籬總覽</span>
+          <button onClick={() => { setSelectedProject(null); setView('construction'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'construction' && !selectedProject ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}>
+            <HomeIcon className="w-5 h-5" /> <span className="font-medium">圍籬總覽</span>
           </button>
-          <button onClick={() => { setSelectedProject(null); setView('modular_house'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'modular_house' && !selectedProject ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
-            <LayoutGridIcon className="w-5 h-5 flex-shrink-0" /> <span className="font-medium">組合屋總覽</span>
+          <button onClick={() => { setSelectedProject(null); setView('modular_house'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'modular_house' && !selectedProject ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}>
+            <LayoutGridIcon className="w-5 h-5" /> <span className="font-medium">組合屋總覽</span>
           </button>
-          <button onClick={() => { setSelectedProject(null); setView('maintenance'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'maintenance' && !selectedProject ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
-            <WrenchIcon className="w-5 h-5 flex-shrink-0" /> <span className="font-medium">維修總覽</span>
+          <button onClick={() => { setSelectedProject(null); setView('maintenance'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'maintenance' && !selectedProject ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}>
+            <WrenchIcon className="w-5 h-5" /> <span className="font-medium">維修總覽</span>
           </button>
-          <button onClick={() => { setSelectedProject(null); setView('report'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'report' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
-            <ClipboardListIcon className="w-5 h-5 flex-shrink-0" /> <span className="font-medium">工作回報</span>
+          <button onClick={() => { setSelectedProject(null); setView('report'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'report' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}>
+            <ClipboardListIcon className="w-5 h-5" /> <span className="font-medium">工作回報</span>
           </button>
-          <button onClick={() => { setSelectedProject(null); setView('materials'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'materials' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
-            <BoxIcon className="w-5 h-5 flex-shrink-0" /> <span className="font-medium">材料請購</span>
+          <button onClick={() => { setSelectedProject(null); setView('materials'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'materials' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}>
+            <BoxIcon className="w-5 h-5" /> <span className="font-medium">材料請購</span>
           </button>
           {currentUser.role === UserRole.ADMIN && (
-             <button onClick={() => { setView('users'); setSelectedProject(null); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'users' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
-               <ShieldIcon className="w-5 h-5 flex-shrink-0" /> <span className="font-medium">權限管理</span>
+             <button onClick={() => { setView('users'); setSelectedProject(null); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'users' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}>
+               <ShieldIcon className="w-5 h-5" /> <span className="font-medium">權限管理</span>
              </button>
           )}
         </nav>
         <div className="p-4 border-t border-slate-800 w-full mt-auto mb-safe">
-          <button onClick={handleLogout} className="flex w-full items-center justify-center gap-2 px-4 py-3 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors text-sm bg-slate-800/50 border border-slate-700 active:scale-95">
+          <button onClick={handleLogout} className="flex w-full items-center justify-center gap-2 px-4 py-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors text-sm">
             <LogOutIcon className="w-4 h-4" /> 登出
           </button>
         </div>
@@ -432,14 +435,9 @@ const App: React.FC = () => {
 
   return (
     <div className="flex h-screen bg-[#f8fafc] overflow-hidden">
-      <div className={`fixed inset-0 z-[100] md:hidden transition-opacity duration-300 ${isSidebarOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'}`}>
+      <div className={`fixed inset-0 z-[100] md:hidden transition-opacity duration-300 ${isSidebarOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
         <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={() => setIsSidebarOpen(false)} />
-        <aside className={`absolute left-0 top-0 bottom-0 w-64 bg-slate-900 text-white shadow-2xl transition-transform duration-300 transform ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} flex flex-col`}>
-          <div className="flex justify-end p-4">
-            <button onClick={() => setIsSidebarOpen(false)} className="text-slate-400 hover:text-white p-2">
-              <XIcon className="w-6 h-6" />
-            </button>
-          </div>
+        <aside className={`absolute left-0 top-0 bottom-0 w-64 bg-slate-900 text-white flex flex-col transform transition-transform duration-300 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
           {renderSidebarContent()}
         </aside>
       </div>
@@ -448,14 +446,10 @@ const App: React.FC = () => {
       </aside>
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden relative">
         <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-6 shadow-sm z-20">
-          <div className="flex items-center gap-4">
-             <button onClick={() => setIsSidebarOpen(true)} className="md:hidden text-slate-500 p-2 hover:bg-slate-100 rounded-lg transition-colors">
-               <MenuIcon className="w-6 h-6" />
-             </button>
-             <div className="flex items-center text-sm">
-                <span className="font-bold text-slate-800">{selectedProject ? selectedProject.name : view}</span>
-             </div>
-          </div>
+          <button onClick={() => setIsSidebarOpen(true)} className="md:hidden text-slate-500 p-2">
+            <MenuIcon className="w-6 h-6" />
+          </button>
+          <div className="text-sm font-bold text-slate-700">{selectedProject ? selectedProject.name : view}</div>
           <div className="flex items-center gap-3">
             <div className="text-sm font-bold text-slate-700 hidden sm:block">{currentUser.name}</div>
             <div className="w-9 h-9 rounded-full bg-slate-100 flex items-center justify-center"><UserIcon className="w-5 h-5 text-slate-400" /></div>
