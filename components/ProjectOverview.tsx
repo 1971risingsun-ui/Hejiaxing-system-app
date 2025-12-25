@@ -54,8 +54,10 @@ const ProjectOverview: React.FC<ProjectOverviewProps> = ({ project, currentUser,
   };
 
   const formatDate = (dateStr: string) => {
-    if (!dateStr) return '';
-    const [y, m, d] = dateStr.split('-');
+    if (!dateStr || typeof dateStr !== 'string') return '';
+    const parts = dateStr.split('-');
+    if (parts.length !== 3) return dateStr;
+    const [y, m, d] = parts;
     return `${m}/${d}/${y}`;
   };
 

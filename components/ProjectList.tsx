@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { Project, ProjectStatus, User, UserRole } from '../types';
 import { CalendarIcon, MapPinIcon, SearchIcon, MoreVerticalIcon, EditIcon, CopyIcon, TrashIcon, LayoutGridIcon, ListIcon, PlusIcon } from './Icons';
@@ -51,10 +52,17 @@ const ProjectList: React.FC<ProjectListProps> = ({ title, projects, currentUser,
   };
 
   const filteredProjects = projects.filter(project => {
+    if (!project) return false;
+    
+    const search = searchTerm.toLowerCase();
+    const name = (project.name || '').toLowerCase();
+    const client = (project.clientName || '').toLowerCase();
+    const addr = (project.address || '').toLowerCase();
+    
     const matchesSearch = 
-      project.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-      project.clientName.toLowerCase().includes(searchTerm.toLowerCase()) || 
-      project.address.toLowerCase().includes(searchTerm.toLowerCase());
+      name.includes(search) || 
+      client.includes(search) || 
+      addr.includes(search);
     
     const matchesStatus = statusFilter === 'ALL' || project.status === statusFilter;
 
@@ -211,7 +219,6 @@ const ProjectList: React.FC<ProjectListProps> = ({ title, projects, currentUser,
                     <MapPinIcon className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
                     <span className="truncate">{project.address}</span>
                   </div>
-                  {/* Appointment and Report dates on the same line */}
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-xs">
                     <div className="flex items-center gap-1.5">
                       <CalendarIcon className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />

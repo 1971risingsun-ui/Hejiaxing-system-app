@@ -24,12 +24,13 @@ export const generateId = () => {
   return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
 };
 
+// 優化後的 Base64 轉換函數，避免大檔案導致的 RangeError
 const bufferToBase64 = (buffer: ArrayBuffer, mimeType: string): string => {
   const bytes = new Uint8Array(buffer);
   let binary = '';
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i]);
+  const chunkSide = 8192; // 每次處理 8KB 避免堆疊溢位
+  for (let i = 0; i < bytes.length; i += chunkSide) {
+    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunkSide)));
   }
   return `data:${mimeType};base64,${btoa(binary)}`;
 };
@@ -38,19 +39,31 @@ const parseExcelDate = (val: any): string => {
   if (val === null || val === undefined || val === '') return '';
   if (val instanceof Date) {
     if (isNaN(val.getTime())) return '';
-    return val.toISOString().split('T')[0];
+    try {
+      return val.toISOString().split('T')[0];
+    } catch (e) {
+      return '';
+    }
   }
   const str = String(val).trim();
   if (!str) return '';
+  
+  // 處理 yyyy-mm-dd 或 dd-mm-yyyy 等常見格式
   const dateMatch = str.match(/^(\d{1,4})[/-](\d{1,2})[/-](\d{1,4})$/);
   if (dateMatch) {
     let [_, p1, p2, p3] = dateMatch;
     if (p1.length === 4) return `${p1}-${p2.padStart(2, '0')}-${p3.padStart(2, '0')}`;
     if (p3.length === 4) return `${p3}-${p1.padStart(2, '0')}-${p2.padStart(2, '0')}`;
   }
+
+  // 處理 Excel 序號日期 (例如 45321)
   if (!isNaN(Number(str)) && Number(str) > 30000) {
-    const date = new Date(Math.round((Number(str) - 25569) * 86400 * 1000));
-    return date.toISOString().split('T')[0];
+    try {
+      const date = new Date(Math.round((Number(str) - 25569) * 86400 * 1000));
+      if (!isNaN(date.getTime())) {
+        return date.toISOString().split('T')[0];
+      }
+    } catch (e) {}
   }
   return str;
 };
@@ -76,20 +89,19 @@ const App: React.FC = () => {
   const [dirHandle, setDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [dirPermission, setDirPermission] = useState<'granted' | 'prompt' | 'denied'>('prompt');
   const [isWorkspaceLoading, setIsWorkspaceLoading] = useState(false);
-  // 新增：初始化鎖定狀態，確保「先讀取 db.json 並合併」才允許「自動寫入」
   const [isInitialized, setIsInitialized] = useState(false);
   
   const excelInputRef = useRef<HTMLInputElement>(null);
 
   const sortProjects = (list: Project[]) => {
+    if (!Array.isArray(list)) return [];
     return [...list].sort((a, b) => {
       const dateA = a.appointmentDate || a.reportDate || '9999-12-31';
       const dateB = b.appointmentDate || b.reportDate || '9999-12-31';
-      return dateA.localeCompare(dateB);
+      return String(dateA).localeCompare(String(dateB));
     });
   };
 
-  // 初始化恢復 Handle 並強制先嘗試載入資料
   useEffect(() => {
     const restoreAndLoad = async () => {
       const savedHandle = await getHandleFromIdb();
@@ -102,7 +114,6 @@ const App: React.FC = () => {
           if (status === 'granted') {
             const savedData = await loadDbFromLocal(savedHandle);
             if (savedData) {
-              // 合併策略：以 db.json 為主，但保留本機可能更新的項目 (若 ID 重複則暫以 db.json 為主)
               if (savedData.projects) setProjects(sortProjects(savedData.projects));
               if (savedData.users) setAllUsers(savedData.users);
               if (savedData.auditLogs) setAuditLogs(savedData.auditLogs);
@@ -112,7 +123,6 @@ const App: React.FC = () => {
           console.error('恢復 Handle 載入失敗', e);
         }
       }
-      // 不論有沒有成功從資料夾載入，都標記為已初始化，此時 localStorage 的資料已載入
       setIsInitialized(true);
     };
     restoreAndLoad();
@@ -155,7 +165,6 @@ const App: React.FC = () => {
           setProjects(sorted);
           if (savedData.users) setAllUsers(savedData.users);
           if (savedData.auditLogs) setAuditLogs(savedData.auditLogs);
-          // 建立連結時強制同步一次最新狀態
           await syncToLocal(handle, { projects: sorted, users: savedData.users || allUsers, auditLogs: savedData.auditLogs || auditLogs });
         } else {
           await syncToLocal(handle, { projects, users: allUsers, auditLogs });
@@ -234,17 +243,21 @@ const App: React.FC = () => {
         const rowImages = imagesByRow[rowNumber] || [];
         const newAttachments: Attachment[] = [];
         rowImages.forEach((imgMeta: any, idx: number) => {
-          const img = workbook.getImage(imgMeta.imageId);
-          if (img) {
-            const mimeType = `image/${img.extension}`;
-            const base64 = bufferToBase64(img.buffer, mimeType);
-            newAttachments.push({
-              id: `excel-img-${rowNumber}-${idx}-${Date.now()}`,
-              name: `匯入圖片_${rowNumber}_${idx}.${img.extension}`,
-              size: img.buffer.byteLength,
-              type: mimeType,
-              url: base64
-            });
+          try {
+            const img = workbook.getImage(imgMeta.imageId);
+            if (img && img.buffer) {
+              const mimeType = `image/${img.extension}`;
+              const base64 = bufferToBase64(img.buffer, mimeType);
+              newAttachments.push({
+                id: `excel-img-${rowNumber}-${idx}-${Date.now()}`,
+                name: `匯入圖片_${rowNumber}_${idx}.${img.extension}`,
+                size: img.buffer.byteLength,
+                type: mimeType,
+                url: base64
+              });
+            }
+          } catch (e) {
+            console.warn('圖片處理失敗', e);
           }
         });
 
@@ -317,9 +330,7 @@ const App: React.FC = () => {
     }
   };
 
-  // 核心：修正自動寫入邏輯
   useEffect(() => {
-    // 只有在完成啟動載入（isInitialized === true）後，才允許執行寫入同步
     if (!isInitialized) return;
 
     const lastSaved = new Date().toISOString();
