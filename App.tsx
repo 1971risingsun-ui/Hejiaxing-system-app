@@ -11,7 +11,7 @@ import LoginScreen from './components/LoginScreen';
 import GlobalWorkReport from './components/GlobalWorkReport';
 import GlobalMaterials from './components/GlobalMaterials';
 import { HomeIcon, UserIcon, LogOutIcon, ShieldIcon, MenuIcon, XIcon, ChevronRightIcon, WrenchIcon, UploadIcon, LoaderIcon, ClipboardListIcon, LayoutGridIcon, BoxIcon, DownloadIcon, FileTextIcon, CheckCircleIcon, AlertIcon, XCircleIcon } from './components/Icons';
-import { getDirectoryHandle, saveDbToLocal, loadDbFromLocal, getHandleFromIdb, clearHandleFromIdb } from './utils/fileSystem';
+import { getDirectoryHandle, saveDbToLocal, loadDbFromLocal, getHandleFromIdb, clearHandleFromIdb, saveAppStateToIdb, loadAppStateFromIdb } from './utils/fileSystem';
 import { downloadBlob } from './utils/fileHelpers';
 import ExcelJS from 'exceljs';
 
@@ -24,10 +24,6 @@ export const generateId = () => {
   return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
 };
 
-/**
- * 記憶體友善的 Base64 轉換函數
- * 使用 Blob + FileReader，這是處理大型檔案最穩定的方式
- */
 const bufferToBase64 = (buffer: ArrayBuffer, mimeType: string): Promise<string> => {
   return new Promise((resolve, reject) => {
     const blob = new Blob([buffer], { type: mimeType });
@@ -44,9 +40,7 @@ const parseExcelDate = (val: any): string => {
     if (isNaN(val.getTime())) return '';
     try {
       return val.toISOString().split('T')[0];
-    } catch (e) {
-      return '';
-    }
+    } catch (e) { return ''; }
   }
   const str = String(val).trim();
   if (!str) return '';
@@ -65,22 +59,14 @@ const parseExcelDate = (val: any): string => {
   return str;
 };
 
-const getInitialData = (key: string, defaultValue: any) => {
-  try {
-    const saved = localStorage.getItem(`hjx_cache_${key}`);
-    return saved ? JSON.parse(saved) : defaultValue;
-  } catch (e) {
-    return defaultValue;
-  }
-};
-
 const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [projects, setProjects] = useState<Project[]>(() => getInitialData('projects', []));
-  const [allUsers, setAllUsers] = useState<User[]>(() => getInitialData('users', [
+  // 初始值設為空，等待 useEffect 從 IndexedDB 恢復
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [allUsers, setAllUsers] = useState<User[]>([
     { id: 'u-1', name: 'Admin User', email: 'admin@hejiaxing.ai', role: UserRole.ADMIN, avatar: '' },
-  ]));
-  const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() => getInitialData('auditLogs', []));
+  ]);
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [importUrl, setImportUrl] = useState(() => localStorage.getItem('hjx_import_url') || '\\\\HJXSERVER\\App test\\上傳排程表.xlsx');
   
   const [dirHandle, setDirHandle] = useState<FileSystemDirectoryHandle | null>(null);
@@ -99,9 +85,19 @@ const App: React.FC = () => {
     });
   };
 
+  // 初始化載入邏輯：IndexedDB (快取) -> File System (db.json)
   useEffect(() => {
     const restoreAndLoad = async () => {
       try {
+        // 1. 先從 IndexedDB 載入資料（這是手機版的核心儲存處）
+        const cachedState = await loadAppStateFromIdb();
+        if (cachedState) {
+          if (Array.isArray(cachedState.projects)) setProjects(sortProjects(cachedState.projects));
+          if (Array.isArray(cachedState.users)) setAllUsers(cachedState.users);
+          if (Array.isArray(cachedState.auditLogs)) setAuditLogs(cachedState.auditLogs);
+        }
+
+        // 2. 嘗試恢復電腦版資料夾 Handle
         const savedHandle = await getHandleFromIdb();
         if (savedHandle) {
           setDirHandle(savedHandle);
@@ -110,14 +106,16 @@ const App: React.FC = () => {
           if (status === 'granted') {
             const savedData = await loadDbFromLocal(savedHandle);
             if (savedData) {
-              if (Array.isArray(savedData.projects)) setProjects(sortProjects(savedData.projects));
-              if (Array.isArray(savedData.users)) setAllUsers(savedData.users);
-              if (Array.isArray(savedData.auditLogs)) setAuditLogs(savedData.auditLogs);
+               // 若電腦版資料夾有 db.json，以它為準進行合併
+               const dbProjects = Array.isArray(savedData.projects) ? savedData.projects : [];
+               setProjects(sortProjects(dbProjects));
+               if (Array.isArray(savedData.users)) setAllUsers(savedData.users);
+               if (Array.isArray(savedData.auditLogs)) setAuditLogs(savedData.auditLogs);
             }
           }
         }
       } catch (e) {
-        console.error('啟動恢復失敗', e);
+        console.error('資料恢復過程失敗', e);
       } finally {
         setIsInitialized(true);
       }
@@ -130,7 +128,7 @@ const App: React.FC = () => {
       const payload = { ...data, lastSaved: new Date().toISOString() };
       await saveDbToLocal(handle, payload);
     } catch (e) {
-      console.error('同步至資料夾失敗', e);
+      console.error('同步至電腦資料夾失敗', e);
     }
   };
 
@@ -162,6 +160,9 @@ const App: React.FC = () => {
           if (savedData.auditLogs) setAuditLogs(savedData.auditLogs);
           await syncToLocal(handle, { projects: sorted, users: savedData.users || allUsers, auditLogs: savedData.auditLogs || auditLogs });
           if (addedFromDbCount > 0) alert(`已從資料夾同步 ${addedFromDbCount} 筆新案件。`);
+        } else {
+          // 若資料夾內沒 db.json，把目前資料寫進去
+          await syncToLocal(handle, { projects, users: allUsers, auditLogs });
         }
       }
     } catch (e: any) {
@@ -293,16 +294,31 @@ const App: React.FC = () => {
     }
   };
 
+  // 自動儲存邏輯 (IndexedDB + 電腦資料夾)
   useEffect(() => {
     if (!isInitialized) return;
-    try {
-      localStorage.setItem('hjx_cache_projects', JSON.stringify(projects));
-      localStorage.setItem('hjx_cache_users', JSON.stringify(allUsers));
-      localStorage.setItem('hjx_cache_auditLogs', JSON.stringify(auditLogs));
-      if (dirHandle && dirPermission === 'granted') syncToLocal(dirHandle, { projects, users: allUsers, auditLogs });
-    } catch (e) {
-      console.warn('自動儲存失敗', e);
-    }
+    
+    const saveAll = async () => {
+        try {
+            // 核心：存入 IndexedDB，不限容量，手機版最穩
+            await saveAppStateToIdb({
+                projects,
+                users: allUsers,
+                auditLogs,
+                lastSaved: new Date().toISOString()
+            });
+
+            // 桌機版同步至資料夾
+            if (dirHandle && dirPermission === 'granted') {
+                syncToLocal(dirHandle, { projects, users: allUsers, auditLogs });
+            }
+        } catch (e) {
+            console.error('自動儲存失敗', e);
+        }
+    };
+
+    const timer = setTimeout(saveAll, 500); // 延遲寫入，避免高頻率操作卡頓
+    return () => clearTimeout(timer);
   }, [projects, allUsers, auditLogs, dirHandle, dirPermission, isInitialized]);
 
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
@@ -340,11 +356,15 @@ const App: React.FC = () => {
            </h1>
         </div>
         <nav className="flex-1 px-4 space-y-2 overflow-y-auto no-scrollbar">
-          {!isInitialized && <div className="px-4 py-2 text-xs text-yellow-500 animate-pulse flex items-center gap-2"><LoaderIcon className="w-3 h-3 animate-spin" /> 資料同步載入中...</div>}
+          {!isInitialized && <div className="px-4 py-2 text-xs text-yellow-500 animate-pulse flex items-center gap-2"><LoaderIcon className="w-3 h-3 animate-spin" /> 資料載入中...</div>}
+          
           <div className="space-y-3 mb-6">
             <button onClick={connectWorkspace} className={`flex items-center gap-3 px-4 py-3 rounded-xl w-full transition-all border ${isConnected ? 'bg-green-600/10 border-green-500 text-green-400' : 'bg-red-600/10 border-red-500 text-red-400'}`}>
               {isWorkspaceLoading ? <LoaderIcon className="w-5 h-5 animate-spin" /> : isConnected ? <CheckCircleIcon className="w-5 h-5" /> : <AlertIcon className="w-5 h-5" />}
-              <div className="flex flex-col items-start text-left"><span className="text-sm font-bold">{isConnected ? '資料庫已連結' : '連結本機資料夾'}</span><span className="text-[10px] opacity-70">db.json 自動同步</span></div>
+              <div className="flex flex-col items-start text-left">
+                <span className="text-sm font-bold">{isConnected ? '電腦同步已開啟' : '未連結電腦目錄'}</span>
+                <span className="text-[10px] opacity-70">db.json 自動備份</span>
+              </div>
             </button>
             <div className="px-1 pt-2">
               <input type="file" accept=".xlsx, .xls" ref={excelInputRef} className="hidden" onChange={handleImportExcel} />
@@ -354,6 +374,7 @@ const App: React.FC = () => {
               </button>
             </div>
           </div>
+
           <button onClick={() => { setSelectedProject(null); setView('construction'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'construction' && !selectedProject ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}><HomeIcon className="w-5 h-5" /> <span className="font-medium">圍籬總覽</span></button>
           <button onClick={() => { setSelectedProject(null); setView('modular_house'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'modular_house' && !selectedProject ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}><LayoutGridIcon className="w-5 h-5" /> <span className="font-medium">組合屋總覽</span></button>
           <button onClick={() => { setSelectedProject(null); setView('maintenance'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'maintenance' && !selectedProject ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}><WrenchIcon className="w-5 h-5" /> <span className="font-medium">維修總覽</span></button>
@@ -377,7 +398,10 @@ const App: React.FC = () => {
         <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-6 shadow-sm z-20">
           <button onClick={() => setIsSidebarOpen(true)} className="md:hidden text-slate-500 p-2"><MenuIcon className="w-6 h-6" /></button>
           <div className="text-sm font-bold text-slate-700">{selectedProject ? selectedProject.name : view}</div>
-          <div className="flex items-center gap-3"><div className="text-sm font-bold text-slate-700 hidden sm:block">{currentUser.name}</div><div className="w-9 h-9 rounded-full bg-slate-100 flex items-center justify-center"><UserIcon className="w-5 h-5 text-slate-400" /></div></div>
+          <div className="flex items-center gap-3">
+            <div className="text-sm font-bold text-slate-700 hidden sm:block">{currentUser.name}</div>
+            <div className="w-9 h-9 rounded-full bg-slate-100 flex items-center justify-center"><UserIcon className="w-5 h-5 text-slate-400" /></div>
+          </div>
         </header>
         <main className="flex-1 overflow-auto bg-[#f8fafc] pb-safe">
           {view === 'users' ? (<UserManagement users={allUsers} onUpdateUsers={setAllUsers} auditLogs={auditLogs} onLogAction={(action, details) => setAuditLogs(prev => [{ id: generateId(), userId: currentUser.id, userName: currentUser.name, action, details, timestamp: Date.now() }, ...prev])} importUrl={importUrl} onUpdateImportUrl={(url) => { setImportUrl(url); localStorage.setItem('hjx_import_url', url); }} projects={projects} onRestoreData={(data) => { setProjects(data.projects); setAllUsers(data.users); setAuditLogs(data.auditLogs); }} />) : 

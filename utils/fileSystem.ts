@@ -1,24 +1,56 @@
 
 /**
  * 使用 File System Access API 進行本機資料夾存取
- * 並透過 IndexedDB 持久化 Handle
+ * 並透過 IndexedDB 持久化 Handle 與 App 狀態
  */
 
 const DB_NAME = 'hjx_handle_db';
 const STORE_NAME = 'handles';
+const APP_STATE_KEY = 'app_full_state';
 const HANDLE_KEY = 'current_dir';
 const DB_FILENAME = 'db.json';
 
 // 初始化 IndexedDB
 const getDB = (): Promise<IDBDatabase> => {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 1);
-    request.onupgradeneeded = () => {
-      request.result.createObjectStore(STORE_NAME);
+    const request = indexedDB.open(DB_NAME, 2); // 升級版本以確保 Store 存在
+    request.onupgradeneeded = (e: any) => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME);
+      }
     };
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.onerror);
+    request.onerror = () => reject(request.error);
   });
+};
+
+// 儲存整個 App 狀態到 IndexedDB (用於手機端大量資料儲存)
+export const saveAppStateToIdb = async (state: any) => {
+  try {
+    const db = await getDB();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    // 直接存入物件，IndexedDB 會處理序列化，比 localStorage 效能更好且容量極大
+    store.put(state, APP_STATE_KEY);
+    return new Promise((resolve) => (tx.oncomplete = resolve));
+  } catch (e) {
+    console.error('IndexedDB 儲存失敗', e);
+  }
+};
+
+// 從 IndexedDB 讀取 App 狀態
+export const loadAppStateFromIdb = async (): Promise<any | null> => {
+  try {
+    const db = await getDB();
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const request = tx.objectStore(STORE_NAME).get(APP_STATE_KEY);
+    return new Promise((resolve) => {
+      request.onsuccess = () => resolve(request.result || null);
+    });
+  } catch (e) {
+    return null;
+  }
 };
 
 export const saveHandleToIdb = async (handle: FileSystemDirectoryHandle) => {
@@ -50,7 +82,7 @@ export const clearHandleFromIdb = async () => {
 
 export const getDirectoryHandle = async (): Promise<FileSystemDirectoryHandle> => {
   if (!('showDirectoryPicker' in window)) {
-    throw new Error('您的瀏覽器不支援本機存取，請使用 Chrome 或 Edge。');
+    throw new Error('您的瀏覽器不支援本機同步，資料將僅保存在手機瀏覽器快取中。');
   }
 
   try {
@@ -68,8 +100,6 @@ export const getDirectoryHandle = async (): Promise<FileSystemDirectoryHandle> =
 
 export const saveDbToLocal = async (handle: FileSystemDirectoryHandle, data: any) => {
   try {
-    // 檢查權限
-    // Fix: Cast to any to access File System Access API methods not yet in standard TS types
     if ((await (handle as any).queryPermission({ mode: 'readwrite' })) !== 'granted') return;
     
     const fileHandle = await handle.getFileHandle(DB_FILENAME, { create: true });
@@ -77,14 +107,12 @@ export const saveDbToLocal = async (handle: FileSystemDirectoryHandle, data: any
     await writable.write(JSON.stringify(data, null, 2));
     await writable.close();
   } catch (e) {
-    console.error('儲存本機檔案失敗', e);
+    console.error('儲存本機 db.json 失敗', e);
   }
 };
 
 export const loadDbFromLocal = async (handle: FileSystemDirectoryHandle): Promise<any | null> => {
   try {
-    // 檢查權限
-    // Fix: Cast to any to access File System Access API methods not yet in standard TS types
     if ((await (handle as any).queryPermission({ mode: 'read' })) !== 'granted') return null;
     
     const fileHandle = await handle.getFileHandle(DB_FILENAME);
