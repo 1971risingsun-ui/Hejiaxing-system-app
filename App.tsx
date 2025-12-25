@@ -24,15 +24,18 @@ export const generateId = () => {
   return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
 };
 
-// 優化後的 Base64 轉換函數，避免大檔案導致的 RangeError
-const bufferToBase64 = (buffer: ArrayBuffer, mimeType: string): string => {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  const chunkSide = 8192; // 每次處理 8KB 避免堆疊溢位
-  for (let i = 0; i < bytes.length; i += chunkSide) {
-    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunkSide)));
-  }
-  return `data:${mimeType};base64,${btoa(binary)}`;
+/**
+ * 記憶體友善的 Base64 轉換函數
+ * 使用 Blob + FileReader，這是處理大型檔案最穩定的方式
+ */
+const bufferToBase64 = (buffer: ArrayBuffer, mimeType: string): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const blob = new Blob([buffer], { type: mimeType });
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
 };
 
 const parseExcelDate = (val: any): string => {
@@ -47,22 +50,16 @@ const parseExcelDate = (val: any): string => {
   }
   const str = String(val).trim();
   if (!str) return '';
-  
-  // 處理 yyyy-mm-dd 或 dd-mm-yyyy 等常見格式
   const dateMatch = str.match(/^(\d{1,4})[/-](\d{1,2})[/-](\d{1,4})$/);
   if (dateMatch) {
     let [_, p1, p2, p3] = dateMatch;
     if (p1.length === 4) return `${p1}-${p2.padStart(2, '0')}-${p3.padStart(2, '0')}`;
     if (p3.length === 4) return `${p3}-${p1.padStart(2, '0')}-${p2.padStart(2, '0')}`;
   }
-
-  // 處理 Excel 序號日期 (例如 45321)
   if (!isNaN(Number(str)) && Number(str) > 30000) {
     try {
       const date = new Date(Math.round((Number(str) - 25569) * 86400 * 1000));
-      if (!isNaN(date.getTime())) {
-        return date.toISOString().split('T')[0];
-      }
+      if (!isNaN(date.getTime())) return date.toISOString().split('T')[0];
     } catch (e) {}
   }
   return str;
@@ -104,26 +101,26 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const restoreAndLoad = async () => {
-      const savedHandle = await getHandleFromIdb();
-      if (savedHandle) {
-        setDirHandle(savedHandle);
-        try {
+      try {
+        const savedHandle = await getHandleFromIdb();
+        if (savedHandle) {
+          setDirHandle(savedHandle);
           const status = await (savedHandle as any).queryPermission({ mode: 'readwrite' });
           setDirPermission(status);
-          
           if (status === 'granted') {
             const savedData = await loadDbFromLocal(savedHandle);
             if (savedData) {
-              if (savedData.projects) setProjects(sortProjects(savedData.projects));
-              if (savedData.users) setAllUsers(savedData.users);
-              if (savedData.auditLogs) setAuditLogs(savedData.auditLogs);
+              if (Array.isArray(savedData.projects)) setProjects(sortProjects(savedData.projects));
+              if (Array.isArray(savedData.users)) setAllUsers(savedData.users);
+              if (Array.isArray(savedData.auditLogs)) setAuditLogs(savedData.auditLogs);
             }
           }
-        } catch (e) {
-          console.error('恢復 Handle 載入失敗', e);
         }
+      } catch (e) {
+        console.error('啟動恢復失敗', e);
+      } finally {
+        setIsInitialized(true);
       }
-      setIsInitialized(true);
     };
     restoreAndLoad();
   }, []);
@@ -147,7 +144,6 @@ const App: React.FC = () => {
       }
       const status = await (handle as any).requestPermission({ mode: 'readwrite' });
       setDirPermission(status);
-
       if (status === 'granted') {
         const savedData = await loadDbFromLocal(handle);
         if (savedData) {
@@ -160,19 +156,16 @@ const App: React.FC = () => {
               addedFromDbCount++;
             }
           });
-          if (addedFromDbCount > 0) alert(`已從資料夾同步 ${addedFromDbCount} 筆新案件。`);
           const sorted = sortProjects(mergedProjects);
           setProjects(sorted);
           if (savedData.users) setAllUsers(savedData.users);
           if (savedData.auditLogs) setAuditLogs(savedData.auditLogs);
           await syncToLocal(handle, { projects: sorted, users: savedData.users || allUsers, auditLogs: savedData.auditLogs || auditLogs });
-        } else {
-          await syncToLocal(handle, { projects, users: allUsers, auditLogs });
+          if (addedFromDbCount > 0) alert(`已從資料夾同步 ${addedFromDbCount} 筆新案件。`);
         }
       }
     } catch (e: any) {
       alert(e.message);
-      if (e.message.includes('權限')) setDirPermission('denied');
     } finally {
       setIsWorkspaceLoading(false);
     }
@@ -196,24 +189,12 @@ const App: React.FC = () => {
       let updateCount = 0;
       
       const headers: Record<string, number> = {};
-      const firstRow = worksheet.getRow(1);
-      firstRow.eachCell((cell: any, colNumber: number) => {
+      worksheet.getRow(1).eachCell((cell: any, colNumber: number) => {
         const headerText = cell.value?.toString().trim();
         if (headerText) headers[headerText] = colNumber;
       });
 
-      const requiredHeaders = ['客戶', '類別'];
-      const missing = requiredHeaders.filter(h => !headers[h]);
-      if (missing.length > 0) {
-          throw new Error(`Excel 格式不正確，缺少欄位：${missing.join(', ')}`);
-      }
-
-      const getValByHeader = (row: any, headerName: string) => {
-        const idx = headers[headerName];
-        if (!idx) return null;
-        const cell = row.getCell(idx);
-        return cell.value;
-      };
+      if (!headers['客戶'] || !headers['類別']) throw new Error('缺少必要欄位：「客戶」或「類別」。');
 
       const excelImages = worksheet.getImages();
       const imagesByRow: Record<number, any[]> = {};
@@ -223,31 +204,28 @@ const App: React.FC = () => {
         imagesByRow[rowIdx].push(imgMeta);
       });
 
-      worksheet.eachRow((row: any, rowNumber: number) => {
-        if (rowNumber === 1) return;
+      const rows = worksheet.getRows(2, worksheet.rowCount - 1) || [];
+      for (const row of rows) {
+        const rowNumber = row.number;
+        const rawName = row.getCell(headers['客戶']).value?.toString().trim() || '';
+        if (!rawName) continue;
 
-        const rawName = getValByHeader(row, '客戶')?.toString().trim() || '';
-        if (!rawName) return; 
-
-        const categoryStr = getValByHeader(row, '類別')?.toString() || '';
+        const categoryStr = row.getCell(headers['類別']).value?.toString() || '';
         let projectType = ProjectType.CONSTRUCTION;
-        if (categoryStr.includes('維修')) {
-          projectType = ProjectType.MAINTENANCE;
-        } else if (categoryStr.includes('組合屋')) {
-          projectType = ProjectType.MODULAR_HOUSE;
-        }
+        if (categoryStr.includes('維修')) projectType = ProjectType.MAINTENANCE;
+        else if (categoryStr.includes('組合屋')) projectType = ProjectType.MODULAR_HOUSE;
 
         const clientName = rawName.includes('-') ? rawName.split('-')[0].trim() : rawName;
         const existingIdx = currentProjects.findIndex(p => p.name === rawName);
         
         const rowImages = imagesByRow[rowNumber] || [];
         const newAttachments: Attachment[] = [];
-        rowImages.forEach((imgMeta: any, idx: number) => {
+        for (const [idx, imgMeta] of rowImages.entries()) {
           try {
             const img = workbook.getImage(imgMeta.imageId);
-            if (img && img.buffer) {
+            if (img && img.buffer && img.buffer.byteLength < 2000000) {
               const mimeType = `image/${img.extension}`;
-              const base64 = bufferToBase64(img.buffer, mimeType);
+              const base64 = await bufferToBase64(img.buffer, mimeType);
               newAttachments.push({
                 id: `excel-img-${rowNumber}-${idx}-${Date.now()}`,
                 name: `匯入圖片_${rowNumber}_${idx}.${img.extension}`,
@@ -259,19 +237,19 @@ const App: React.FC = () => {
           } catch (e) {
             console.warn('圖片處理失敗', e);
           }
-        });
+        }
 
         const projectUpdateData: Partial<Project> = {
           name: rawName,
           type: projectType,
           clientName: clientName,
-          clientContact: getValByHeader(row, '聯絡人')?.toString() || '',
-          clientPhone: getValByHeader(row, '電話')?.toString() || '',
-          address: getValByHeader(row, '地址')?.toString() || '',
-          appointmentDate: parseExcelDate(getValByHeader(row, '預約日期')),
-          reportDate: parseExcelDate(getValByHeader(row, '報修日期')),
-          description: getValByHeader(row, '工程')?.toString() || '',
-          remarks: getValByHeader(row, '備註')?.toString() || '',
+          clientContact: row.getCell(headers['聯絡人'] || 0).value?.toString() || '',
+          clientPhone: row.getCell(headers['電話'] || 0).value?.toString() || '',
+          address: row.getCell(headers['地址'] || 0).value?.toString() || '',
+          appointmentDate: parseExcelDate(row.getCell(headers['預約日期'] || 0).value),
+          reportDate: parseExcelDate(row.getCell(headers['報修日期'] || 0).value),
+          description: row.getCell(headers['工程'] || 0).value?.toString() || '',
+          remarks: row.getCell(headers['備註'] || 0).value?.toString() || '',
         };
 
         if (existingIdx !== -1) {
@@ -282,15 +260,10 @@ const App: React.FC = () => {
                   mergedAttachments.push(na);
               }
           });
-
-          currentProjects[existingIdx] = {
-            ...existingProject,
-            ...projectUpdateData,
-            attachments: mergedAttachments
-          };
+          currentProjects[existingIdx] = { ...existingProject, ...projectUpdateData, attachments: mergedAttachments };
           updateCount++;
         } else {
-          const newProject: Project = {
+          currentProjects.push({
             id: generateId(),
             status: ProjectStatus.PLANNING,
             progress: 0,
@@ -303,26 +276,16 @@ const App: React.FC = () => {
             completionReports: [],
             attachments: newAttachments,
             ...(projectUpdateData as Project)
-          };
-          currentProjects.push(newProject);
+          });
           newCount++;
         }
-      });
+        if (rowNumber % 20 === 0) await new Promise(r => setTimeout(r, 0));
+      }
 
       setProjects(sortProjects(currentProjects));
       alert(`匯入完成！\n新增：${newCount} 筆\n更新：${updateCount} 筆`);
-      
-      setAuditLogs(prev => [{
-        id: generateId(),
-        userId: currentUser?.id || 'system',
-        userName: currentUser?.name || '系統',
-        action: 'IMPORT_EXCEL',
-        details: `匯入 Excel: ${file.name}, 新增 ${newCount}, 更新 ${updateCount}`,
-        timestamp: Date.now()
-      }, ...prev]);
-
+      setAuditLogs(prev => [{ id: generateId(), userId: currentUser?.id || 'system', userName: currentUser?.name || '系統', action: 'IMPORT_EXCEL', details: `匯入 Excel: ${file.name}, 新增 ${newCount}, 更新 ${updateCount}`, timestamp: Date.now() }, ...prev]);
     } catch (error: any) {
-      console.error('Excel 匯入失敗', error);
       alert('Excel 匯入失敗: ' + error.message);
     } finally {
       setIsWorkspaceLoading(false);
@@ -332,15 +295,13 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!isInitialized) return;
-
-    const lastSaved = new Date().toISOString();
-    localStorage.setItem('hjx_cache_projects', JSON.stringify(projects));
-    localStorage.setItem('hjx_cache_users', JSON.stringify(allUsers));
-    localStorage.setItem('hjx_cache_auditLogs', JSON.stringify(auditLogs));
-    localStorage.setItem('hjx_cache_lastSaved', lastSaved);
-
-    if (dirHandle && dirPermission === 'granted') {
-        syncToLocal(dirHandle, { projects, users: allUsers, auditLogs });
+    try {
+      localStorage.setItem('hjx_cache_projects', JSON.stringify(projects));
+      localStorage.setItem('hjx_cache_users', JSON.stringify(allUsers));
+      localStorage.setItem('hjx_cache_auditLogs', JSON.stringify(auditLogs));
+      if (dirHandle && dirPermission === 'granted') syncToLocal(dirHandle, { projects, users: allUsers, auditLogs });
+    } catch (e) {
+      console.warn('自動儲存失敗', e);
     }
   }, [projects, allUsers, auditLogs, dirHandle, dirPermission, isInitialized]);
 
@@ -352,24 +313,16 @@ const App: React.FC = () => {
 
   const handleLogin = (user: User) => { setCurrentUser(user); setView('construction'); };
   const handleLogout = () => { setCurrentUser(null); setIsSidebarOpen(false); };
-
   const handleDeleteProject = (id: string) => {
-    if (window.confirm('確定要刪除此案件嗎？')) {
-      const newList = projects.filter(p => p.id !== id);
-      setProjects(sortProjects(newList));
-    }
+    if (window.confirm('確定要刪除此案件嗎？')) setProjects(sortProjects(projects.filter(p => p.id !== id)));
   };
-
   const handleUpdateProject = (updatedProject: Project) => {
-    setProjects(prev => {
-        const newList = prev.map(p => p.id === updatedProject.id ? updatedProject : p);
-        return sortProjects(newList);
-    });
+    setProjects(prev => sortProjects(prev.map(p => p.id === updatedProject.id ? updatedProject : p)));
     if (selectedProject?.id === updatedProject.id) setSelectedProject(updatedProject);
   };
 
   if (!currentUser) return <LoginScreen onLogin={handleLogin} />;
-
+  
   const currentViewProjects = projects.filter(p => {
     if (view === 'construction') return p.type === ProjectType.CONSTRUCTION;
     if (view === 'modular_house') return p.type === ProjectType.MODULAR_HOUSE;
@@ -379,7 +332,6 @@ const App: React.FC = () => {
 
   const renderSidebarContent = () => {
     const isConnected = dirHandle && dirPermission === 'granted';
-
     return (
       <>
         <div className="flex items-center justify-center w-full px-2 py-6 mb-2">
@@ -388,23 +340,11 @@ const App: React.FC = () => {
            </h1>
         </div>
         <nav className="flex-1 px-4 space-y-2 overflow-y-auto no-scrollbar">
-          {!isInitialized && (
-            <div className="px-4 py-2 text-xs text-yellow-500 animate-pulse flex items-center gap-2">
-              <LoaderIcon className="w-3 h-3 animate-spin" /> 資料同步載入中...
-            </div>
-          )}
+          {!isInitialized && <div className="px-4 py-2 text-xs text-yellow-500 animate-pulse flex items-center gap-2"><LoaderIcon className="w-3 h-3 animate-spin" /> 資料同步載入中...</div>}
           <div className="space-y-3 mb-6">
-            <button 
-              onClick={connectWorkspace}
-              className={`flex items-center gap-3 px-4 py-3 rounded-xl w-full transition-all border ${
-                isConnected ? 'bg-green-600/10 border-green-500 text-green-400' : 'bg-red-600/10 border-red-500 text-red-400'
-              }`}
-            >
+            <button onClick={connectWorkspace} className={`flex items-center gap-3 px-4 py-3 rounded-xl w-full transition-all border ${isConnected ? 'bg-green-600/10 border-green-500 text-green-400' : 'bg-red-600/10 border-red-500 text-red-400'}`}>
               {isWorkspaceLoading ? <LoaderIcon className="w-5 h-5 animate-spin" /> : isConnected ? <CheckCircleIcon className="w-5 h-5" /> : <AlertIcon className="w-5 h-5" />}
-              <div className="flex flex-col items-start text-left">
-                <span className="text-sm font-bold">{isConnected ? '資料庫已連結' : '連結本機資料夾'}</span>
-                <span className="text-[10px] opacity-70">db.json 自動同步</span>
-              </div>
+              <div className="flex flex-col items-start text-left"><span className="text-sm font-bold">{isConnected ? '資料庫已連結' : '連結本機資料夾'}</span><span className="text-[10px] opacity-70">db.json 自動同步</span></div>
             </button>
             <div className="px-1 pt-2">
               <input type="file" accept=".xlsx, .xls" ref={excelInputRef} className="hidden" onChange={handleImportExcel} />
@@ -414,32 +354,14 @@ const App: React.FC = () => {
               </button>
             </div>
           </div>
-          <button onClick={() => { setSelectedProject(null); setView('construction'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'construction' && !selectedProject ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}>
-            <HomeIcon className="w-5 h-5" /> <span className="font-medium">圍籬總覽</span>
-          </button>
-          <button onClick={() => { setSelectedProject(null); setView('modular_house'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'modular_house' && !selectedProject ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}>
-            <LayoutGridIcon className="w-5 h-5" /> <span className="font-medium">組合屋總覽</span>
-          </button>
-          <button onClick={() => { setSelectedProject(null); setView('maintenance'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'maintenance' && !selectedProject ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}>
-            <WrenchIcon className="w-5 h-5" /> <span className="font-medium">維修總覽</span>
-          </button>
-          <button onClick={() => { setSelectedProject(null); setView('report'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'report' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}>
-            <ClipboardListIcon className="w-5 h-5" /> <span className="font-medium">工作回報</span>
-          </button>
-          <button onClick={() => { setSelectedProject(null); setView('materials'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'materials' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}>
-            <BoxIcon className="w-5 h-5" /> <span className="font-medium">材料請購</span>
-          </button>
-          {currentUser.role === UserRole.ADMIN && (
-             <button onClick={() => { setView('users'); setSelectedProject(null); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'users' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}>
-               <ShieldIcon className="w-5 h-5" /> <span className="font-medium">權限管理</span>
-             </button>
-          )}
+          <button onClick={() => { setSelectedProject(null); setView('construction'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'construction' && !selectedProject ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}><HomeIcon className="w-5 h-5" /> <span className="font-medium">圍籬總覽</span></button>
+          <button onClick={() => { setSelectedProject(null); setView('modular_house'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'modular_house' && !selectedProject ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}><LayoutGridIcon className="w-5 h-5" /> <span className="font-medium">組合屋總覽</span></button>
+          <button onClick={() => { setSelectedProject(null); setView('maintenance'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'maintenance' && !selectedProject ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}><WrenchIcon className="w-5 h-5" /> <span className="font-medium">維修總覽</span></button>
+          <button onClick={() => { setSelectedProject(null); setView('report'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'report' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}><ClipboardListIcon className="w-5 h-5" /> <span className="font-medium">工作回報</span></button>
+          <button onClick={() => { setSelectedProject(null); setView('materials'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'materials' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}><BoxIcon className="w-5 h-5" /> <span className="font-medium">材料請購</span></button>
+          {currentUser.role === UserRole.ADMIN && (<button onClick={() => { setView('users'); setSelectedProject(null); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'users' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}><ShieldIcon className="w-5 h-5" /> <span className="font-medium">權限管理</span></button>)}
         </nav>
-        <div className="p-4 border-t border-slate-800 w-full mt-auto mb-safe">
-          <button onClick={handleLogout} className="flex w-full items-center justify-center gap-2 px-4 py-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors text-sm">
-            <LogOutIcon className="w-4 h-4" /> 登出
-          </button>
-        </div>
+        <div className="p-4 border-t border-slate-800 w-full mt-auto mb-safe"><button onClick={handleLogout} className="flex w-full items-center justify-center gap-2 px-4 py-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors text-sm"><LogOutIcon className="w-4 h-4" /> 登出</button></div>
       </>
     );
   };
@@ -448,36 +370,21 @@ const App: React.FC = () => {
     <div className="flex h-screen bg-[#f8fafc] overflow-hidden">
       <div className={`fixed inset-0 z-[100] md:hidden transition-opacity duration-300 ${isSidebarOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
         <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={() => setIsSidebarOpen(false)} />
-        <aside className={`absolute left-0 top-0 bottom-0 w-64 bg-slate-900 text-white flex flex-col transform transition-transform duration-300 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
-          {renderSidebarContent()}
-        </aside>
+        <aside className={`absolute left-0 top-0 bottom-0 w-64 bg-slate-900 text-white flex flex-col transform transition-transform duration-300 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>{renderSidebarContent()}</aside>
       </div>
-      <aside className="hidden md:flex w-64 flex-col bg-slate-900 text-white flex-shrink-0">
-        {renderSidebarContent()}
-      </aside>
+      <aside className="hidden md:flex w-64 flex-col bg-slate-900 text-white flex-shrink-0">{renderSidebarContent()}</aside>
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden relative">
         <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-6 shadow-sm z-20">
-          <button onClick={() => setIsSidebarOpen(true)} className="md:hidden text-slate-500 p-2">
-            <MenuIcon className="w-6 h-6" />
-          </button>
+          <button onClick={() => setIsSidebarOpen(true)} className="md:hidden text-slate-500 p-2"><MenuIcon className="w-6 h-6" /></button>
           <div className="text-sm font-bold text-slate-700">{selectedProject ? selectedProject.name : view}</div>
-          <div className="flex items-center gap-3">
-            <div className="text-sm font-bold text-slate-700 hidden sm:block">{currentUser.name}</div>
-            <div className="w-9 h-9 rounded-full bg-slate-100 flex items-center justify-center"><UserIcon className="w-5 h-5 text-slate-400" /></div>
-          </div>
+          <div className="flex items-center gap-3"><div className="text-sm font-bold text-slate-700 hidden sm:block">{currentUser.name}</div><div className="w-9 h-9 rounded-full bg-slate-100 flex items-center justify-center"><UserIcon className="w-5 h-5 text-slate-400" /></div></div>
         </header>
         <main className="flex-1 overflow-auto bg-[#f8fafc] pb-safe">
-          {view === 'users' ? (
-            <UserManagement users={allUsers} onUpdateUsers={setAllUsers} auditLogs={auditLogs} onLogAction={(action, details) => setAuditLogs(prev => [{ id: generateId(), userId: currentUser.id, userName: currentUser.name, action, details, timestamp: Date.now() }, ...prev])} importUrl={importUrl} onUpdateImportUrl={(url) => { setImportUrl(url); localStorage.setItem('hjx_import_url', url); }} projects={projects} onRestoreData={(data) => { setProjects(data.projects); setAllUsers(data.users); setAuditLogs(data.auditLogs); }} />
-          ) : view === 'report' ? (
-            <GlobalWorkReport projects={projects} currentUser={currentUser} onUpdateProject={handleUpdateProject} />
-          ) : view === 'materials' ? (
-            <GlobalMaterials projects={projects} onSelectProject={setSelectedProject} />
-          ) : selectedProject ? (
-            <ProjectDetail project={selectedProject} currentUser={currentUser} onBack={() => setSelectedProject(null)} onUpdateProject={handleUpdateProject} onEditProject={setEditingProject} />
-          ) : (
-            <ProjectList projects={currentViewProjects} currentUser={currentUser} onSelectProject={setSelectedProject} onAddProject={() => setIsAddModalOpen(true)} onDeleteProject={handleDeleteProject} onDuplicateProject={()=>{}} onEditProject={setEditingProject} />
-          )}
+          {view === 'users' ? (<UserManagement users={allUsers} onUpdateUsers={setAllUsers} auditLogs={auditLogs} onLogAction={(action, details) => setAuditLogs(prev => [{ id: generateId(), userId: currentUser.id, userName: currentUser.name, action, details, timestamp: Date.now() }, ...prev])} importUrl={importUrl} onUpdateImportUrl={(url) => { setImportUrl(url); localStorage.setItem('hjx_import_url', url); }} projects={projects} onRestoreData={(data) => { setProjects(data.projects); setAllUsers(data.users); setAuditLogs(data.auditLogs); }} />) : 
+           view === 'report' ? (<GlobalWorkReport projects={projects} currentUser={currentUser} onUpdateProject={handleUpdateProject} />) : 
+           view === 'materials' ? (<GlobalMaterials projects={projects} onSelectProject={setSelectedProject} />) : 
+           selectedProject ? (<ProjectDetail project={selectedProject} currentUser={currentUser} onBack={() => setSelectedProject(null)} onUpdateProject={handleUpdateProject} onEditProject={setEditingProject} />) : 
+           (<ProjectList projects={currentViewProjects} currentUser={currentUser} onSelectProject={setSelectedProject} onAddProject={() => setIsAddModalOpen(true)} onDeleteProject={handleDeleteProject} onDuplicateProject={()=>{}} onEditProject={setEditingProject} />)}
         </main>
       </div>
       {isAddModalOpen && <AddProjectModal onClose={() => setIsAddModalOpen(false)} onAdd={(p) => { setProjects(sortProjects([p, ...projects])); setIsAddModalOpen(false); }} defaultType={view === 'maintenance' ? ProjectType.MAINTENANCE : view === 'modular_house' ? ProjectType.MODULAR_HOUSE : ProjectType.CONSTRUCTION} />}
