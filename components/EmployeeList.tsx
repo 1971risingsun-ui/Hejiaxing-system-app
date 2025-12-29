@@ -1,7 +1,7 @@
 
 import React, { useState } from 'react';
 import { Employee, EmployeeCategory } from '../types';
-import { PlusIcon, TrashIcon, EditIcon, UsersIcon } from './Icons';
+import { PlusIcon, TrashIcon, EditIcon, UsersIcon, SearchIcon, XIcon } from './Icons';
 
 interface EmployeeListProps {
   employees: Employee[];
@@ -11,6 +11,7 @@ interface EmployeeListProps {
 const EmployeeList: React.FC<EmployeeListProps> = ({ employees = [], onUpdateEmployees }) => {
   const [isAdding, setIsAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [searchTerm, setSearchTerm] = useState('');
   const [formState, setFormState] = useState({ name: '', nickname: '', lineId: '', category: '現場' as EmployeeCategory });
 
   const handleOpenAdd = () => {
@@ -50,9 +51,20 @@ const EmployeeList: React.FC<EmployeeListProps> = ({ employees = [], onUpdateEmp
     }
   };
 
+  // 搜尋過濾邏輯
+  const filteredEmployees = employees.filter(emp => {
+    const search = searchTerm.toLowerCase();
+    return (
+      emp.name.toLowerCase().includes(search) ||
+      (emp.nickname && emp.nickname.toLowerCase().includes(search)) ||
+      (emp.lineId && emp.lineId.toLowerCase().includes(search))
+    );
+  });
+
   return (
     <div className="space-y-6 animate-fade-in h-full flex flex-col p-4 md:p-6 bg-slate-50 overflow-auto no-scrollbar pb-24">
-      <div className="flex justify-between items-center bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex-shrink-0">
+      {/* 標題與新增按鈕 */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex-shrink-0 gap-4">
         <div className="flex items-center gap-3">
             <div className="bg-blue-100 p-2.5 rounded-xl"><UsersIcon className="w-6 h-6 text-blue-600" /></div>
             <div>
@@ -60,14 +72,36 @@ const EmployeeList: React.FC<EmployeeListProps> = ({ employees = [], onUpdateEmp
                 <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Employee List</p>
             </div>
         </div>
-        <button 
-          onClick={handleOpenAdd}
-          className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 shadow-lg shadow-blue-100 transition-all active:scale-95"
-        >
-          <PlusIcon className="w-4 h-4" /> 新增人員
-        </button>
+
+        <div className="flex items-center gap-3 flex-1 md:max-w-md">
+            <div className="relative flex-1">
+                <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <input 
+                    type="text" 
+                    placeholder="搜尋姓名、暱稱或 Line ID..." 
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    className="w-full pl-10 pr-10 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-700 outline-none focus:ring-2 focus:ring-blue-500 transition-all shadow-inner"
+                />
+                {searchTerm && (
+                    <button 
+                        onClick={() => setSearchTerm('')}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 hover:text-slate-500"
+                    >
+                        <XIcon className="w-4 h-4" />
+                    </button>
+                )}
+            </div>
+            <button 
+              onClick={handleOpenAdd}
+              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 shadow-lg shadow-blue-100 transition-all active:scale-95 flex-shrink-0"
+            >
+              <PlusIcon className="w-4 h-4" /> 新增
+            </button>
+        </div>
       </div>
 
+      {/* 新增/編輯表單 */}
       {isAdding && (
         <div className="bg-white p-6 rounded-2xl border border-blue-200 shadow-xl animate-fade-in flex-shrink-0">
           <h4 className="font-bold text-slate-800 mb-4">{editingId ? '修改人員資訊' : '新增人員資訊'}</h4>
@@ -124,6 +158,7 @@ const EmployeeList: React.FC<EmployeeListProps> = ({ employees = [], onUpdateEmp
         </div>
       )}
 
+      {/* 資料表格 */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex-1 flex flex-col min-h-0">
         <div className="overflow-auto flex-1 custom-scrollbar">
           <table className="w-full text-left">
@@ -137,11 +172,11 @@ const EmployeeList: React.FC<EmployeeListProps> = ({ employees = [], onUpdateEmp
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {employees.map(emp => (
-                <tr key={emp.id} className="hover:bg-slate-50/50 transition-colors">
+              {filteredEmployees.map(emp => (
+                <tr key={emp.id} className="hover:bg-slate-50/50 transition-colors group">
                   <td className="px-6 py-4 font-black text-slate-800">{emp.name}</td>
                   <td className="px-6 py-4 text-sm text-slate-500">{emp.nickname || '-'}</td>
-                  <td className="px-6 py-4 text-sm text-slate-500">{emp.lineId || '-'}</td>
+                  <td className="px-6 py-4 text-sm text-slate-500 font-mono">{emp.lineId || '-'}</td>
                   <td className="px-6 py-4">
                     <span className={`text-[11px] font-bold px-3 py-1.5 rounded-lg border ${
                       emp.category === '現場' ? 'bg-blue-50 text-blue-600 border-blue-100' :
@@ -159,12 +194,12 @@ const EmployeeList: React.FC<EmployeeListProps> = ({ employees = [], onUpdateEmp
                   </td>
                 </tr>
               ))}
-              {employees.length === 0 && (
+              {filteredEmployees.length === 0 && (
                 <tr>
                   <td colSpan={5} className="text-center py-20 text-slate-400 italic text-sm">
                     <div className="flex flex-col items-center gap-2 opacity-50">
                         <UsersIcon className="w-10 h-10" />
-                        尚未建立人員名單
+                        {searchTerm ? '找不到符合條件的人員' : '尚未建立人員名單'}
                     </div>
                   </td>
                 </tr>
