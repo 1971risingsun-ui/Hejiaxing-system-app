@@ -1,6 +1,6 @@
 
 import React, { useState, useRef } from 'react';
-import { User, UserRole, AuditLog, Project } from '../types';
+import { User, UserRole, AuditLog, Project, Employee } from '../types';
 import { PlusIcon, TrashIcon, ShieldIcon, UserIcon, HistoryIcon, DownloadIcon, UploadIcon, BoxIcon, SettingsIcon, CheckCircleIcon } from './Icons';
 import { downloadBlob } from '../utils/fileHelpers';
 
@@ -10,7 +10,8 @@ interface UserManagementProps {
   auditLogs: AuditLog[];
   onLogAction: (action: string, details: string) => void;
   projects?: Project[];
-  onRestoreData?: (data: { projects: Project[], users: User[], auditLogs: AuditLog[] }) => void;
+  // Fix: Added employees to the onRestoreData data structure
+  onRestoreData?: (data: { projects: Project[], users: User[], auditLogs: AuditLog[], employees?: Employee[] }) => void;
   importUrl: string;
   onUpdateImportUrl: (url: string) => void;
 }
@@ -86,10 +87,12 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, onUpdateUsers, a
 
         if (confirm(`還原將覆寫現有資料，確定嗎？`)) {
           if (onRestoreData) {
+            // Fix: Pass employees from json to onRestoreData
             onRestoreData({
               projects: json.projects,
               users: json.users || users,
-              auditLogs: json.auditLogs || auditLogs
+              auditLogs: json.auditLogs || auditLogs,
+              employees: json.employees
             });
           }
         }

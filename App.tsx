@@ -1,16 +1,17 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { App as CapacitorApp } from '@capacitor/app';
-import { Project, ProjectStatus, User, UserRole, MaterialStatus, AuditLog, ProjectType, Attachment } from './types';
+import { Project, ProjectStatus, User, UserRole, MaterialStatus, AuditLog, ProjectType, Attachment, Employee } from './types';
 import ProjectList from './components/ProjectList';
 import ProjectDetail from './components/ProjectDetail';
 import UserManagement from './components/UserManagement';
+import EmployeeList from './components/EmployeeList';
 import AddProjectModal from './components/AddProjectModal';
 import EditProjectModal from './components/EditProjectModal';
 import LoginScreen from './components/LoginScreen';
 import GlobalWorkReport from './components/GlobalWorkReport';
 import GlobalMaterials from './components/GlobalMaterials';
-import { HomeIcon, UserIcon, LogOutIcon, ShieldIcon, MenuIcon, XIcon, ChevronRightIcon, WrenchIcon, UploadIcon, LoaderIcon, ClipboardListIcon, LayoutGridIcon, BoxIcon, DownloadIcon, FileTextIcon, CheckCircleIcon, AlertIcon, XCircleIcon } from './components/Icons';
+import { HomeIcon, UserIcon, LogOutIcon, ShieldIcon, MenuIcon, XIcon, ChevronRightIcon, WrenchIcon, UploadIcon, LoaderIcon, ClipboardListIcon, LayoutGridIcon, BoxIcon, DownloadIcon, FileTextIcon, CheckCircleIcon, AlertIcon, XCircleIcon, UsersIcon } from './components/Icons';
 import { getDirectoryHandle, saveDbToLocal, loadDbFromLocal, getHandleFromIdb, clearHandleFromIdb, saveAppStateToIdb, loadAppStateFromIdb } from './utils/fileSystem';
 import { downloadBlob } from './utils/fileHelpers';
 import ExcelJS from 'exceljs';
@@ -61,8 +62,8 @@ const parseExcelDate = (val: any): string => {
 
 const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  // 初始值設為空，等待 useEffect 從 IndexedDB 恢復
   const [projects, setProjects] = useState<Project[]>([]);
+  const [employees, setEmployees] = useState<Employee[]>([]);
   const [allUsers, setAllUsers] = useState<User[]>([
     { id: 'u-1', name: 'Admin User', email: 'admin@hejiaxing.ai', role: UserRole.ADMIN, avatar: '' },
   ]);
@@ -85,19 +86,17 @@ const App: React.FC = () => {
     });
   };
 
-  // 初始化載入邏輯：IndexedDB (快取) -> File System (db.json)
   useEffect(() => {
     const restoreAndLoad = async () => {
       try {
-        // 1. 先從 IndexedDB 載入資料（這是手機版的核心儲存處）
         const cachedState = await loadAppStateFromIdb();
         if (cachedState) {
           if (Array.isArray(cachedState.projects)) setProjects(sortProjects(cachedState.projects));
+          if (Array.isArray(cachedState.employees)) setEmployees(cachedState.employees);
           if (Array.isArray(cachedState.users)) setAllUsers(cachedState.users);
           if (Array.isArray(cachedState.auditLogs)) setAuditLogs(cachedState.auditLogs);
         }
 
-        // 2. 嘗試恢復電腦版資料夾 Handle
         const savedHandle = await getHandleFromIdb();
         if (savedHandle) {
           setDirHandle(savedHandle);
@@ -106,9 +105,9 @@ const App: React.FC = () => {
           if (status === 'granted') {
             const savedData = await loadDbFromLocal(savedHandle);
             if (savedData) {
-               // 若電腦版資料夾有 db.json，以它為準進行合併
                const dbProjects = Array.isArray(savedData.projects) ? savedData.projects : [];
                setProjects(sortProjects(dbProjects));
+               if (Array.isArray(savedData.employees)) setEmployees(savedData.employees);
                if (Array.isArray(savedData.users)) setAllUsers(savedData.users);
                if (Array.isArray(savedData.auditLogs)) setAuditLogs(savedData.auditLogs);
             }
@@ -123,7 +122,7 @@ const App: React.FC = () => {
     restoreAndLoad();
   }, []);
 
-  const syncToLocal = async (handle: FileSystemDirectoryHandle, data: { projects: Project[], users: User[], auditLogs: AuditLog[] }) => {
+  const syncToLocal = async (handle: FileSystemDirectoryHandle, data: { projects: Project[], employees: Employee[], users: User[], auditLogs: AuditLog[] }) => {
     try {
       const payload = { ...data, lastSaved: new Date().toISOString() };
       await saveDbToLocal(handle, payload);
@@ -156,13 +155,13 @@ const App: React.FC = () => {
           });
           const sorted = sortProjects(mergedProjects);
           setProjects(sorted);
+          if (Array.isArray(savedData.employees)) setEmployees(savedData.employees);
           if (savedData.users) setAllUsers(savedData.users);
           if (savedData.auditLogs) setAuditLogs(savedData.auditLogs);
-          await syncToLocal(handle, { projects: sorted, users: savedData.users || allUsers, auditLogs: savedData.auditLogs || auditLogs });
+          await syncToLocal(handle, { projects: sorted, employees: savedData.employees || employees, users: savedData.users || allUsers, auditLogs: savedData.auditLogs || auditLogs });
           if (addedFromDbCount > 0) alert(`已從資料夾同步 ${addedFromDbCount} 筆新案件。`);
         } else {
-          // 若資料夾內沒 db.json，把目前資料寫進去
-          await syncToLocal(handle, { projects, users: allUsers, auditLogs });
+          await syncToLocal(handle, { projects, employees, users: allUsers, auditLogs });
         }
       }
     } catch (e: any) {
@@ -294,37 +293,35 @@ const App: React.FC = () => {
     }
   };
 
-  // 自動儲存邏輯 (IndexedDB + 電腦資料夾)
   useEffect(() => {
     if (!isInitialized) return;
     
     const saveAll = async () => {
         try {
-            // 核心：存入 IndexedDB，不限容量，手機版最穩
             await saveAppStateToIdb({
                 projects,
+                employees,
                 users: allUsers,
                 auditLogs,
                 lastSaved: new Date().toISOString()
             });
 
-            // 桌機版同步至資料夾
             if (dirHandle && dirPermission === 'granted') {
-                syncToLocal(dirHandle, { projects, users: allUsers, auditLogs });
+                syncToLocal(dirHandle, { projects, employees, users: allUsers, auditLogs });
             }
         } catch (e) {
             console.error('自動儲存失敗', e);
         }
     };
 
-    const timer = setTimeout(saveAll, 500); // 延遲寫入，避免高頻率操作卡頓
+    const timer = setTimeout(saveAll, 500);
     return () => clearTimeout(timer);
-  }, [projects, allUsers, auditLogs, dirHandle, dirPermission, isInitialized]);
+  }, [projects, employees, allUsers, auditLogs, dirHandle, dirPermission, isInitialized]);
 
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-  const [view, setView] = useState<'construction' | 'modular_house' | 'maintenance' | 'report' | 'materials' | 'users'>('construction');
+  const [view, setView] = useState<'construction' | 'modular_house' | 'maintenance' | 'report' | 'materials' | 'employees' | 'users'>('construction');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   const handleLogin = (user: User) => { setCurrentUser(user); setView('construction'); };
@@ -380,6 +377,7 @@ const App: React.FC = () => {
           <button onClick={() => { setSelectedProject(null); setView('maintenance'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'maintenance' && !selectedProject ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}><WrenchIcon className="w-5 h-5" /> <span className="font-medium">維修總覽</span></button>
           <button onClick={() => { setSelectedProject(null); setView('report'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'report' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}><ClipboardListIcon className="w-5 h-5" /> <span className="font-medium">工作回報</span></button>
           <button onClick={() => { setSelectedProject(null); setView('materials'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'materials' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}><BoxIcon className="w-5 h-5" /> <span className="font-medium">材料請購</span></button>
+          <button onClick={() => { setSelectedProject(null); setView('employees'); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'employees' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}><UsersIcon className="w-5 h-5" /> <span className="font-medium">人員管理</span></button>
           {currentUser.role === UserRole.ADMIN && (<button onClick={() => { setView('users'); setSelectedProject(null); setIsSidebarOpen(false); }} className={`flex items-center gap-3 px-4 py-3 rounded-lg w-full transition-colors ${view === 'users' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}><ShieldIcon className="w-5 h-5" /> <span className="font-medium">權限管理</span></button>)}
         </nav>
         <div className="p-4 border-t border-slate-800 w-full mt-auto mb-safe"><button onClick={handleLogout} className="flex w-full items-center justify-center gap-2 px-4 py-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors text-sm"><LogOutIcon className="w-4 h-4" /> 登出</button></div>
@@ -397,14 +395,15 @@ const App: React.FC = () => {
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden relative">
         <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-6 shadow-sm z-20">
           <button onClick={() => setIsSidebarOpen(true)} className="md:hidden text-slate-500 p-2"><MenuIcon className="w-6 h-6" /></button>
-          <div className="text-sm font-bold text-slate-700">{selectedProject ? selectedProject.name : view}</div>
+          <div className="text-sm font-bold text-slate-700">{selectedProject ? selectedProject.name : view === 'employees' ? '人員管理' : view}</div>
           <div className="flex items-center gap-3">
             <div className="text-sm font-bold text-slate-700 hidden sm:block">{currentUser.name}</div>
             <div className="w-9 h-9 rounded-full bg-slate-100 flex items-center justify-center"><UserIcon className="w-5 h-5 text-slate-400" /></div>
           </div>
         </header>
         <main className="flex-1 overflow-auto bg-[#f8fafc] pb-safe">
-          {view === 'users' ? (<UserManagement users={allUsers} onUpdateUsers={setAllUsers} auditLogs={auditLogs} onLogAction={(action, details) => setAuditLogs(prev => [{ id: generateId(), userId: currentUser.id, userName: currentUser.name, action, details, timestamp: Date.now() }, ...prev])} importUrl={importUrl} onUpdateImportUrl={(url) => { setImportUrl(url); localStorage.setItem('hjx_import_url', url); }} projects={projects} onRestoreData={(data) => { setProjects(data.projects); setAllUsers(data.users); setAuditLogs(data.auditLogs); }} />) : 
+          {view === 'users' ? (<UserManagement users={allUsers} onUpdateUsers={setAllUsers} auditLogs={auditLogs} onLogAction={(action, details) => setAuditLogs(prev => [{ id: generateId(), userId: currentUser.id, userName: currentUser.name, action, details, timestamp: Date.now() }, ...prev])} importUrl={importUrl} onUpdateImportUrl={(url) => { setImportUrl(url); localStorage.setItem('hjx_import_url', url); }} projects={projects} onRestoreData={(data) => { setProjects(data.projects); setAllUsers(data.users); setAuditLogs(data.auditLogs); if(data.employees) setEmployees(data.employees); }} />) : 
+           view === 'employees' ? (<EmployeeList employees={employees} onUpdateEmployees={setEmployees} />) :
            view === 'report' ? (<GlobalWorkReport projects={projects} currentUser={currentUser} onUpdateProject={handleUpdateProject} />) : 
            view === 'materials' ? (<GlobalMaterials projects={projects} onSelectProject={setSelectedProject} />) : 
            selectedProject ? (<ProjectDetail project={selectedProject} currentUser={currentUser} onBack={() => setSelectedProject(null)} onUpdateProject={handleUpdateProject} onEditProject={setEditingProject} />) : 
